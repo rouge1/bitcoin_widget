@@ -34,7 +34,32 @@ pip install requests matplotlib
 python3 bitcoin_widget.py &
 ```
 
-To autostart on login, enable **Start on Login** from the tray menu.
+## Run on Startup
+
+**Option 1 — From the tray menu**
+
+Right-click the BTC tray label and enable **Start on Login**. This creates an XDG autostart entry at `~/.config/autostart/bitcoin-widget.desktop`. Disable it the same way.
+
+**Option 2 — From the command line**
+
+```bash
+python3 autostart.py
+```
+
+**Option 3 — Manual .desktop file**
+
+Create `~/.config/autostart/bitcoin-widget.desktop`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Bitcoin Widget
+Exec=/usr/bin/python3 /full/path/to/bitcoin_widget.py
+X-GNOME-Autostart-enabled=true
+StartupNotify=false
+```
+
+Replace `/full/path/to/` with the actual directory where the widget lives.
 
 ## Configuration
 
