@@ -1,5 +1,35 @@
-POLL_INTERVAL_SECONDS = 30
+import json
+from pathlib import Path
+
+POLL_INTERVAL_SECONDS = {1: 10, 7: 300, 30: 900}  # seconds per timeframe
 GRAPH_HISTORY_DAYS = 1   # default timeframe
+
+_SETTINGS_DIR = Path.home() / ".config" / "bitcoin-widget"
+_SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
+
+
+def load_graph_days() -> int:
+    """Load saved timeframe, falling back to GRAPH_HISTORY_DAYS."""
+    try:
+        data = json.loads(_SETTINGS_FILE.read_text())
+        days = data.get("graph_days", GRAPH_HISTORY_DAYS)
+        if days in (1, 7, 30):
+            return days
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+    return GRAPH_HISTORY_DAYS
+
+
+def save_graph_days(days: int):
+    """Persist the chosen timeframe."""
+    _SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    data = {}
+    try:
+        data = json.loads(_SETTINGS_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    data["graph_days"] = days
+    _SETTINGS_FILE.write_text(json.dumps(data))
 
 TRAY_ICON_WIDTH = 150
 TRAY_ICON_HEIGHT = 24

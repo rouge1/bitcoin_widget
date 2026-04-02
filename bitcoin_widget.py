@@ -3,7 +3,10 @@
 
 import sys
 import os
+import json
+import socket
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -72,12 +75,26 @@ class GraphWindow(Gtk.Window):
         self.present()
 
 
+SOCKET_PATH = "/tmp/bitcoin_widget.sock"
+
+
 class BitcoinWidget:
     def __init__(self):
         self._cached_graph: GdkPixbuf.Pixbuf | None = None
-        self._graph_days = config.GRAPH_HISTORY_DAYS
+        self._graph_days = config.load_graph_days()
         self._auto_show_graph = False
         self._graph_window = GraphWindow()
+
+        # --- Live price (shared with graph renderer) ---
+        self._live_price = None
+        self._live_change = None
+
+        # --- Diagnostic state ---
+        self._state = {
+            "label": {"text": "BTC …", "price": None, "change": None, "updated": None},
+            "graph": {"price": None, "change": None, "points": 0, "days": self._graph_days, "updated": None},
+            "api": {"price": None, "change": None, "source": None, "updated": None},
+        }
 
         # --- AppIndicator ---
         self._indicator = AppIndicator3.Indicator.new(
@@ -94,6 +111,9 @@ class BitcoinWidget:
             price_callback=self._on_price_update,
             history_callback=self._on_history_update,
         )
+
+        # --- Diagnostic socket ---
+        self._start_socket_server()
 
     # ------------------------------------------------------------------ #
     #  Menu                                                                #
@@ -153,9 +173,15 @@ class BitcoinWidget:
         arrow = "▲" if change_24h >= 0 else "▼"
         label = f"BTC ${price:,.0f} {arrow}{abs(change_24h):.1f}%"
         self._indicator.set_label(label, "BTC $999,999 ▼99.9%")
+        self._live_price = price
+        self._live_change = change_24h
+        now = time.time()
+        self._state["label"] = {"text": label, "price": price, "change": round(change_24h, 2), "updated": now}
+        self._state["api"] = {"price": price, "change": round(change_24h, 2), "source": self._fetcher.last_price_source, "updated": now}
         return False
 
     def _on_history_update(self, points: list):
+        self._last_history_points = points
         threading.Thread(
             target=self._render_graph_bg,
             args=(points, self._graph_days),
@@ -164,13 +190,27 @@ class BitcoinWidget:
         return False
 
     def _render_graph_bg(self, points, days):
-        pixbuf = render_graph(points, days=days)
+        pixbuf = render_graph(points, days=days,
+                              live_price=self._live_price,
+                              live_change=self._live_change)
         if pixbuf:
-            GLib.idle_add(self._cache_graph, pixbuf)
+            GLib.idle_add(self._cache_graph, pixbuf, points, days)
 
-    def _cache_graph(self, pixbuf):
+    def _cache_graph(self, pixbuf, points=None, days=None):
         self._cached_graph = pixbuf
         self._item_show_graph.set_sensitive(True)
+        if points:
+            display_price = self._live_price if self._live_price is not None else points[-1][1]
+            display_change = self._live_change if self._live_change is not None else (
+                (points[-1][1] - points[0][1]) / points[0][1] * 100
+            )
+            self._state["graph"] = {
+                "price": round(display_price, 2),
+                "change": round(display_change, 2),
+                "points": len(points),
+                "days": days or self._graph_days,
+                "updated": time.time(),
+            }
         if self._auto_show_graph or self._graph_window.get_visible():
             self._auto_show_graph = False
             self._graph_window.show_graph(pixbuf, reuse_pos=True)
@@ -193,6 +233,7 @@ class BitcoinWidget:
     def _on_timeframe_toggled(self, item, days):
         if item.get_active() and days != self._graph_days:
             self._graph_days = days
+            config.save_graph_days(days)
             self._fetcher.set_history_days(days)
             self._cached_graph = None
             self._item_show_graph.set_sensitive(False)
@@ -214,12 +255,43 @@ class BitcoinWidget:
         Gtk.main_quit()
 
     # ------------------------------------------------------------------ #
+    #  Diagnostic socket                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _start_socket_server(self):
+        # Clean up stale socket
+        try:
+            os.unlink(SOCKET_PATH)
+        except FileNotFoundError:
+            pass
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.bind(SOCKET_PATH)
+        self._sock.listen(4)
+        threading.Thread(target=self._socket_loop, daemon=True).start()
+
+    def _socket_loop(self):
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+                with conn:
+                    response = json.dumps(self._state, indent=2) + "\n"
+                    conn.sendall(response.encode())
+            except OSError:
+                break
+
+    # ------------------------------------------------------------------ #
     #  Run                                                                 #
     # ------------------------------------------------------------------ #
 
     def run(self):
         self._fetcher.start()
         Gtk.main()
+        # cleanup socket on exit
+        try:
+            self._sock.close()
+            os.unlink(SOCKET_PATH)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

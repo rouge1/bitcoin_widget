@@ -13,7 +13,8 @@ import config
 
 
 def render_graph(points: list, width: int = config.GRAPH_WIDTH,
-                 height: int = config.GRAPH_HEIGHT, days: int = 1) -> GdkPixbuf.Pixbuf:
+                 height: int = config.GRAPH_HEIGHT, days: int = 1,
+                 live_price: float = None, live_change: float = None) -> GdkPixbuf.Pixbuf:
     """Render a price chart to a GdkPixbuf. Always call with data from CoinGecko
     (list of [timestamp_ms, price])."""
     if not points:
@@ -55,14 +56,15 @@ def render_graph(points: list, width: int = config.GRAPH_WIDTH,
 
     ax.grid(axis="y", color="#2a2a2a", linewidth=0.6, zorder=1)
 
-    # Price annotation at latest point
-    latest_price = prices[-1]
-    first_price = prices[0]
-    pct = (latest_price - first_price) / first_price * 100
-    color = "#33dd33" if pct >= 0 else "#ee4444"
-    arrow = "▲" if pct >= 0 else "▼"
-    label = f"  ${latest_price:,.0f}  {arrow}{abs(pct):.1f}%"
-    ax.annotate(label, xy=(times[-1], latest_price),
+    # Price annotation — use live spot price if available, else last candle
+    display_price = live_price if live_price is not None else prices[-1]
+    display_change = live_change if live_change is not None else (
+        (prices[-1] - prices[0]) / prices[0] * 100
+    )
+    color = "#33dd33" if display_change >= 0 else "#ee4444"
+    arrow = "▲" if display_change >= 0 else "▼"
+    label = f"  ${display_price:,.0f}  {arrow}{abs(display_change):.1f}%"
+    ax.annotate(label, xy=(times[-1], display_price),
                 color=color, fontsize=8.5, fontweight="bold",
                 xytext=(-5, 6), textcoords="offset points")
 

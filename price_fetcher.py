@@ -14,24 +14,36 @@ class PriceFetcher:
         self._price_cb = price_callback
         self._history_cb = history_callback
         self._stop = threading.Event()
+        self._stopped = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._history_days = config.GRAPH_HISTORY_DAYS
+        self.last_price_source = None
 
     def start(self):
         self._thread.start()
 
     def stop(self):
+        self._stopped = True
         self._stop.set()
 
     def set_history_days(self, days: int):
         self._history_days = days
+        self._stop.set()  # wake the sleep so the new interval takes effect
 
     def refresh(self):
         threading.Thread(target=self._fetch_all, daemon=True).start()
 
+    def _poll_interval(self):
+        return config.POLL_INTERVAL_SECONDS.get(self._history_days, 30)
+
     def _run(self):
         self._fetch_all()
-        while not self._stop.wait(config.POLL_INTERVAL_SECONDS):
+        while True:
+            if self._stop.wait(self._poll_interval()):
+                if self._stopped:
+                    break
+                # woken by set_history_days — reset and keep going
+                self._stop.clear()
             self._fetch_all()
 
     def _fetch_all(self):
@@ -50,7 +62,9 @@ class PriceFetcher:
     def _fetch_price(self):
         result = self._coinbase_price()
         if result[0] is not None:
+            self.last_price_source = "coinbase"
             return result
+        self.last_price_source = "kraken"
         return self._kraken_price()
 
     def _coinbase_price(self):
@@ -90,8 +104,8 @@ class PriceFetcher:
 
     def _coinbase_history(self, days: int):
         try:
-            # granularity in seconds: 1d→86400, 7d→3600 (168 pts), 1d→3600 (24 pts)
-            granularity = 86400 if days >= 30 else 3600
+            # granularity: 1d→300s/5min (288 pts), 7d→3600s/1h (168 pts), 30d→86400s/1d
+            granularity = 86400 if days >= 30 else (3600 if days >= 7 else 300)
             end = int(time.time())
             start = end - days * 86400
             url = config.COINBASE_CANDLES_URL.format(
@@ -109,8 +123,8 @@ class PriceFetcher:
 
     def _kraken_history(self, days: int):
         try:
-            # interval in minutes: 60=1h, 1440=1d
-            interval = 1440 if days >= 30 else 60
+            # interval in minutes: 5=5min, 60=1h, 1440=1d
+            interval = 1440 if days >= 30 else (60 if days >= 7 else 5)
             since = int(time.time()) - days * 86400
             url = config.KRAKEN_OHLC_URL.format(interval=interval, since=since)
             r = _get(url)
