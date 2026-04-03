@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bitcoin price widget — AppIndicator3 tray label with graph popup."""
 
+import argparse
 import sys
 import os
 import json
@@ -75,11 +76,14 @@ class GraphWindow(Gtk.Window):
         self.present()
 
 
-SOCKET_PATH = "/tmp/bitcoin_widget.sock"
+_DIAG_DIR = os.path.join(os.path.expanduser("~"), ".config", "bitcoin-widget")
+SOCKET_PATH = os.path.join(_DIAG_DIR, "diag.sock")
 
 
 class BitcoinWidget:
-    def __init__(self):
+    def __init__(self, diag=False):
+        self._diag = diag
+        self._sock = None
         self._cached_graph: GdkPixbuf.Pixbuf | None = None
         self._graph_days = config.load_graph_days()
         self._auto_show_graph = False
@@ -112,8 +116,9 @@ class BitcoinWidget:
             history_callback=self._on_history_update,
         )
 
-        # --- Diagnostic socket ---
-        self._start_socket_server()
+        # --- Diagnostic socket (only with --diag) ---
+        if self._diag:
+            self._start_socket_server()
 
     # ------------------------------------------------------------------ #
     #  Menu                                                                #
@@ -259,13 +264,14 @@ class BitcoinWidget:
     # ------------------------------------------------------------------ #
 
     def _start_socket_server(self):
-        # Clean up stale socket
+        os.makedirs(_DIAG_DIR, mode=0o700, exist_ok=True)
         try:
             os.unlink(SOCKET_PATH)
         except FileNotFoundError:
             pass
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(SOCKET_PATH)
+        os.chmod(SOCKET_PATH, 0o600)
         self._sock.listen(4)
         threading.Thread(target=self._socket_loop, daemon=True).start()
 
@@ -286,14 +292,18 @@ class BitcoinWidget:
     def run(self):
         self._fetcher.start()
         Gtk.main()
-        # cleanup socket on exit
-        try:
-            self._sock.close()
-            os.unlink(SOCKET_PATH)
-        except OSError:
-            pass
+        if self._sock:
+            try:
+                self._sock.close()
+                os.unlink(SOCKET_PATH)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
-    app = BitcoinWidget()
+    parser = argparse.ArgumentParser(description="Bitcoin price tray widget")
+    parser.add_argument("--diag", action="store_true",
+                        help="Enable diagnostic socket at ~/.config/bitcoin-widget/diag.sock")
+    args = parser.parse_args()
+    app = BitcoinWidget(diag=args.diag)
     app.run()
