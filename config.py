@@ -8,49 +8,39 @@ _SETTINGS_DIR = Path.home() / ".config" / "bitcoin-widget"
 _SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
 
 
-def load_graph_days() -> int:
-    """Load saved timeframe, falling back to GRAPH_HISTORY_DAYS."""
+def _load_setting(key, default=None):
+    try:
+        return json.loads(_SETTINGS_FILE.read_text()).get(key, default)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return default
+
+
+def _save_setting(key, value):
+    _SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    data = {}
     try:
         data = json.loads(_SETTINGS_FILE.read_text())
-        days = data.get("graph_days", GRAPH_HISTORY_DAYS)
-        if days in (1, 7, 30):
-            return days
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+    except (FileNotFoundError, json.JSONDecodeError):
         pass
-    return GRAPH_HISTORY_DAYS
+    data[key] = value
+    _SETTINGS_FILE.write_text(json.dumps(data))
+
+
+def load_graph_days() -> int:
+    days = _load_setting("graph_days", GRAPH_HISTORY_DAYS)
+    return days if days in (1, 7, 30) else GRAPH_HISTORY_DAYS
 
 
 def save_graph_days(days: int):
-    """Persist the chosen timeframe."""
-    _SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    data = {}
-    try:
-        data = json.loads(_SETTINGS_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-    data["graph_days"] = days
-    _SETTINGS_FILE.write_text(json.dumps(data))
+    _save_setting("graph_days", days)
 
 
 def load_show_candles() -> bool:
-    """Load saved candle preference, default False."""
-    try:
-        data = json.loads(_SETTINGS_FILE.read_text())
-        return bool(data.get("show_candles", False))
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        return False
+    return bool(_load_setting("show_candles", False))
 
 
 def save_show_candles(enabled: bool):
-    """Persist the candle display preference."""
-    _SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-    data = {}
-    try:
-        data = json.loads(_SETTINGS_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-    data["show_candles"] = enabled
-    _SETTINGS_FILE.write_text(json.dumps(data))
+    _save_setting("show_candles", enabled)
 
 TRAY_ICON_WIDTH = 150
 TRAY_ICON_HEIGHT = 24

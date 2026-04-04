@@ -11,30 +11,22 @@ from gi.repository import GdkPixbuf
 import config
 
 
-def _draw_candles(ax, times, opens, highs, lows, closes):
+def _draw_candles(ax, t_nums, opens, highs, lows, closes):
     """Draw candlestick chart using matplotlib primitives."""
-    if len(times) >= 2:
-        avg_interval = (mdates.date2num(times[-1]) - mdates.date2num(times[0])) / (len(times) - 1)
-        body_width = avg_interval * 0.7
+    if len(t_nums) >= 2:
+        body_width = (t_nums[-1] - t_nums[0]) / (len(t_nums) - 1) * 0.7
     else:
         body_width = 0.01
 
-    for i, t in enumerate(times):
-        t_num = mdates.date2num(t)
-        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+    for t, o, h, l, c in zip(t_nums, opens, highs, lows, closes):
         color = config.CANDLE_UP_COLOR if c >= o else config.CANDLE_DOWN_COLOR
-
-        # Wick
-        ax.vlines(t_num, l, h, colors=color, linewidth=config.CANDLE_WICK_WIDTH, zorder=3)
-
-        # Body
+        ax.vlines(t, l, h, colors=color, linewidth=config.CANDLE_WICK_WIDTH, zorder=3)
         body_bottom = min(o, c)
         body_height = abs(c - o) or (h - l) * 0.01  # tiny height for doji
-        ax.bar(t_num, body_height, bottom=body_bottom, width=body_width,
+        ax.bar(t, body_height, bottom=body_bottom, width=body_width,
                color=color, edgecolor=color, linewidth=0.5, zorder=4)
 
-    ax.set_xlim(mdates.date2num(times[0]) - body_width,
-                mdates.date2num(times[-1]) + body_width)
+    ax.set_xlim(t_nums[0] - body_width, t_nums[-1] + body_width)
 
 
 def render_graph(points: list, width: int = config.GRAPH_WIDTH,
@@ -55,13 +47,14 @@ def render_graph(points: list, width: int = config.GRAPH_WIDTH,
     ax.set_facecolor(config.GRAPH_BG_COLOR)
 
     times = [datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc) for p in points]
-    opens  = [p[1] for p in points]
-    highs  = [p[2] for p in points]
-    lows   = [p[3] for p in points]
     closes = [p[4] for p in points]
 
     if show_candles:
-        _draw_candles(ax, times, opens, highs, lows, closes)
+        t_nums = mdates.date2num(times)
+        opens = [p[1] for p in points]
+        highs = [p[2] for p in points]
+        lows  = [p[3] for p in points]
+        _draw_candles(ax, t_nums, opens, highs, lows, closes)
     else:
         ax.plot(times, closes, color=config.GRAPH_LINE_COLOR, linewidth=1.8, zorder=3)
         ax.fill_between(times, closes, min(closes), color=config.GRAPH_LINE_COLOR,

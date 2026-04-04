@@ -237,7 +237,11 @@ class BitcoinWidget:
             "Show Lines" if self._show_candles else "Show Candles"
         )
         if self._cached_points:
-            self._on_history_update(self._cached_points)
+            threading.Thread(
+                target=self._render_graph_bg,
+                args=(self._cached_points, self._graph_days),
+                daemon=True,
+            ).start()
 
     def _on_timeframe_toggled(self, item, days):
         if item.get_active() and days != self._graph_days:
