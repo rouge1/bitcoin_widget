@@ -7,16 +7,42 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
 
-import cairo
 from gi.repository import GdkPixbuf
 import config
 
 
+def _draw_candles(ax, times, opens, highs, lows, closes):
+    """Draw candlestick chart using matplotlib primitives."""
+    if len(times) >= 2:
+        avg_interval = (mdates.date2num(times[-1]) - mdates.date2num(times[0])) / (len(times) - 1)
+        body_width = avg_interval * 0.7
+    else:
+        body_width = 0.01
+
+    for i, t in enumerate(times):
+        t_num = mdates.date2num(t)
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+        color = config.CANDLE_UP_COLOR if c >= o else config.CANDLE_DOWN_COLOR
+
+        # Wick
+        ax.vlines(t_num, l, h, colors=color, linewidth=config.CANDLE_WICK_WIDTH, zorder=3)
+
+        # Body
+        body_bottom = min(o, c)
+        body_height = abs(c - o) or (h - l) * 0.01  # tiny height for doji
+        ax.bar(t_num, body_height, bottom=body_bottom, width=body_width,
+               color=color, edgecolor=color, linewidth=0.5, zorder=4)
+
+    ax.set_xlim(mdates.date2num(times[0]) - body_width,
+                mdates.date2num(times[-1]) + body_width)
+
+
 def render_graph(points: list, width: int = config.GRAPH_WIDTH,
                  height: int = config.GRAPH_HEIGHT, days: int = 1,
-                 live_price: float = None, live_change: float = None) -> GdkPixbuf.Pixbuf:
-    """Render a price chart to a GdkPixbuf. Always call with data from CoinGecko
-    (list of [timestamp_ms, price])."""
+                 live_price: float = None, live_change: float = None,
+                 show_candles: bool = False) -> GdkPixbuf.Pixbuf:
+    """Render a price chart to a GdkPixbuf.
+    points: list of [timestamp_ms, open, high, low, close]."""
     if not points:
         return None
 
@@ -29,12 +55,17 @@ def render_graph(points: list, width: int = config.GRAPH_WIDTH,
     ax.set_facecolor(config.GRAPH_BG_COLOR)
 
     times = [datetime.fromtimestamp(p[0] / 1000, tz=timezone.utc) for p in points]
-    prices = [p[1] for p in points]
+    opens  = [p[1] for p in points]
+    highs  = [p[2] for p in points]
+    lows   = [p[3] for p in points]
+    closes = [p[4] for p in points]
 
-    # Line + gradient fill
-    ax.plot(times, prices, color=config.GRAPH_LINE_COLOR, linewidth=1.8, zorder=3)
-    ax.fill_between(times, prices, min(prices), color=config.GRAPH_LINE_COLOR,
-                    alpha=0.18, zorder=2)
+    if show_candles:
+        _draw_candles(ax, times, opens, highs, lows, closes)
+    else:
+        ax.plot(times, closes, color=config.GRAPH_LINE_COLOR, linewidth=1.8, zorder=3)
+        ax.fill_between(times, closes, min(closes), color=config.GRAPH_LINE_COLOR,
+                        alpha=0.18, zorder=2)
 
     # Axes styling
     ax.spines["top"].set_visible(False)
@@ -57,9 +88,9 @@ def render_graph(points: list, width: int = config.GRAPH_WIDTH,
     ax.grid(axis="y", color="#2a2a2a", linewidth=0.6, zorder=1)
 
     # Price annotation — use live spot price if available, else last candle
-    display_price = live_price if live_price is not None else prices[-1]
+    display_price = live_price if live_price is not None else closes[-1]
     display_change = live_change if live_change is not None else (
-        (prices[-1] - prices[0]) / prices[0] * 100
+        (closes[-1] - closes[0]) / closes[0] * 100
     )
     color = "#33dd33" if display_change >= 0 else "#ee4444"
     arrow = "▲" if display_change >= 0 else "▼"
@@ -86,119 +117,3 @@ def render_graph(points: list, width: int = config.GRAPH_WIDTH,
     return loader.get_pixbuf()
 
 
-def render_tray_icon(price: float, change_24h: float,
-                     width: int = config.TRAY_ICON_WIDTH,
-                     height: int = config.TRAY_ICON_HEIGHT) -> GdkPixbuf.Pixbuf:
-    """Render 'BTC $84,231 ▲0.3%' as a cairo surface → GdkPixbuf."""
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-    ctx = cairo.Context(surface)
-
-    # Transparent background
-    ctx.set_source_rgba(0, 0, 0, 0)
-    ctx.paint()
-
-    ctx.select_font_face(config.FONT_FACE,
-                         cairo.FONT_SLANT_NORMAL,
-                         cairo.FONT_WEIGHT_BOLD)
-    ctx.set_font_size(config.FONT_SIZE)
-
-    price_text = f"BTC ${price:,.0f}"
-    arrow = "▲" if change_24h >= 0 else "▼"
-    delta_text = f" {arrow}{abs(change_24h):.1f}%"
-
-    # Measure so we can vertically center
-    ext = ctx.text_extents(price_text + delta_text)
-    y = (height + ext.height) / 2 - ext.y_bearing - ext.height
-
-    # White price
-    ctx.set_source_rgb(*config.TEXT_COLOR)
-    ctx.move_to(2, y)
-    ctx.show_text(price_text)
-
-    # Colored delta
-    color = config.UP_COLOR if change_24h >= 0 else config.DOWN_COLOR
-    ctx.set_source_rgb(*color)
-    ctx.show_text(delta_text)
-
-    # cairo ARGB32 → raw bytes → GdkPixbuf (RGBA)
-    data = bytes(surface.get_data())
-    # cairo stores BGRA; GdkPixbuf expects RGBA — swap channels
-    import array
-    arr = array.array("B", data)
-    for i in range(0, len(arr), 4):
-        b, g, r, a = arr[i], arr[i+1], arr[i+2], arr[i+3]
-        arr[i],   arr[i+1], arr[i+2], arr[i+3] = r, g, b, a
-    pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
-        GLib_bytes_from_array(arr),
-        GdkPixbuf.Colorspace.RGB, True, 8, width, height, width * 4
-    )
-    return pixbuf
-
-
-def _cairo_surface_to_pixbuf(surface: cairo.ImageSurface) -> GdkPixbuf.Pixbuf:
-    """Convert a cairo ARGB32 surface to a GdkPixbuf (RGBA)."""
-    import array
-    from gi.repository import GLib as _GLib
-
-    width = surface.get_width()
-    height = surface.get_height()
-    data = bytes(surface.get_data())
-
-    # cairo ARGB32 is native-endian; on little-endian (x86) memory order is B G R A.
-    arr = array.array("B", data)
-    for i in range(0, len(arr), 4):
-        b, g, r, a = arr[i], arr[i+1], arr[i+2], arr[i+3]
-        arr[i], arr[i+1], arr[i+2], arr[i+3] = r, g, b, a
-
-    gbytes = _GLib.Bytes.new(arr.tobytes())
-    return GdkPixbuf.Pixbuf.new_from_bytes(
-        gbytes,
-        GdkPixbuf.Colorspace.RGB,
-        True,   # has_alpha
-        8,
-        width, height,
-        width * 4
-    )
-
-
-def render_tray_icon(price: float, change_24h: float,
-                     width: int = config.TRAY_ICON_WIDTH,
-                     height: int = config.TRAY_ICON_HEIGHT) -> GdkPixbuf.Pixbuf:
-    """Render 'BTC $84,231 ▲0.3%' as a cairo surface → GdkPixbuf."""
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-    ctx = cairo.Context(surface)
-
-    ctx.set_source_rgba(0, 0, 0, 0)
-    ctx.paint()
-
-    ctx.select_font_face(config.FONT_FACE,
-                         cairo.FONT_SLANT_NORMAL,
-                         cairo.FONT_WEIGHT_BOLD)
-    ctx.set_font_size(config.FONT_SIZE)
-
-    price_text = f"BTC ${price:,.0f}"
-    arrow = "▲" if change_24h >= 0 else "▼"
-    delta_text = f" {arrow}{abs(change_24h):.1f}%"
-
-    ext = ctx.text_extents(price_text + delta_text)
-    y = (height + ext.height) / 2 - ext.y_bearing - ext.height
-
-    ctx.set_source_rgb(*config.TEXT_COLOR)
-    ctx.move_to(2, y)
-    ctx.show_text(price_text)
-
-    color = config.UP_COLOR if change_24h >= 0 else config.DOWN_COLOR
-    ctx.set_source_rgb(*color)
-    ctx.show_text(delta_text)
-
-    return _cairo_surface_to_pixbuf(surface)
-
-
-if __name__ == "__main__":
-    # Test: save a graph PNG to disk
-    import requests as req
-    url = config.COINGECKO_HISTORY_URL.format(days=1)
-    data = req.get(url, timeout=10).json()["prices"]
-    pixbuf = render_graph(data, days=1)
-    pixbuf.savev("/tmp/btc_graph_test.png", "png", [], [])
-    print("Saved /tmp/btc_graph_test.png")

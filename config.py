@@ -31,6 +31,27 @@ def save_graph_days(days: int):
     data["graph_days"] = days
     _SETTINGS_FILE.write_text(json.dumps(data))
 
+
+def load_show_candles() -> bool:
+    """Load saved candle preference, default False."""
+    try:
+        data = json.loads(_SETTINGS_FILE.read_text())
+        return bool(data.get("show_candles", False))
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return False
+
+
+def save_show_candles(enabled: bool):
+    """Persist the candle display preference."""
+    _SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    data = {}
+    try:
+        data = json.loads(_SETTINGS_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    data["show_candles"] = enabled
+    _SETTINGS_FILE.write_text(json.dumps(data))
+
 TRAY_ICON_WIDTH = 150
 TRAY_ICON_HEIGHT = 24
 
@@ -47,6 +68,10 @@ DOWN_COLOR  = (0.95, 0.3,  0.3)
 
 GRAPH_LINE_COLOR = "#F7931A"   # Bitcoin orange
 GRAPH_BG_COLOR   = "#111111"
+
+CANDLE_UP_COLOR   = "#26a69a"
+CANDLE_DOWN_COLOR = "#ef5350"
+CANDLE_WICK_WIDTH = 1.0
 
 # Coinbase (primary)
 COINBASE_STATS_URL  = "https://api.exchange.coinbase.com/products/BTC-USD/stats"

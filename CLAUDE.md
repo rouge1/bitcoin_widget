@@ -7,8 +7,8 @@ GTK3 system tray applet showing live BTC/USD price with a historical price graph
 ```
 bitcoin_widget.py   # Main app: tray indicator, menu, graph window
 price_fetcher.py    # Background polling thread, Coinbase → Kraken fallback
-graph_renderer.py   # matplotlib graph → GdkPixbuf, cairo tray icon
-config.py           # All constants: URLs, intervals, colours, dimensions
+graph_renderer.py   # matplotlib graph → GdkPixbuf (line chart + candlestick)
+config.py           # All constants: URLs, intervals, colours, dimensions, persisted prefs
 autostart.py        # XDG ~/.config/autostart/ .desktop file management
 ```
 
@@ -21,14 +21,11 @@ python3 bitcoin_widget.py &
 ```
 requests
 matplotlib
-pycairo
 pygobject          # gi: GTK3, GdkPixbuf, GLib, AyatanaAppIndicator3
 ```
 
 Install:
 ```bash
-pip install requests matplotlib pycairo pygobject
-# or
 sudo apt install python3-gi python3-gi-cairo gir1.2-ayatanaappindicator3-0.1
 pip install requests matplotlib
 ```
@@ -57,13 +54,21 @@ Any exception silently falls through to the next source.
 | Kraken | `api.kraken.com/0/public/Ticker?pair=XBTUSD` | price + 24h open |
 | Kraken | `api.kraken.com/0/public/OHLC?pair=XBTUSD` | OHLC `[time_s, o, h, l, c, vwap, vol, count]` |
 
-Candle granularity auto-selects: 1d→`3600s/1h`, 7d→`3600s/1h`, 30d→`86400s/1d`.
+Candle granularity auto-selects: 1d→`300s/5min`, 7d→`3600s/1h`, 30d→`86400s/1d`.
+
+### History data format
+`price_fetcher` returns `[[timestamp_ms, open, high, low, close], ...]` — full OHLCV normalised from both Coinbase and Kraken formats. The line chart uses only `close`; candlestick mode uses all four price fields.
+
+### Candlestick rendering
+`graph_renderer._draw_candles()` draws candles with matplotlib primitives (`ax.vlines` for wicks, `ax.bar` for bodies). No `mplfinance` dependency. Body width is computed dynamically as 70% of the average candle interval so it scales correctly across 5-min, 1-hour, and 1-day granularities.
 
 ### Graph window behaviour
 - Stays visible until dismissed (no auto-hide on focus-out)
 - Click on graph → hides it
 - Escape → hides it
 - "Show Graph" menu item toggles visibility
+- "Show Candles" / "Show Lines" menu item toggles chart type (persisted in `settings.json`)
+- Toggling chart type re-renders from cached OHLCV points — no re-fetch needed
 - Position: just below the panel/taskbar, horizontally near mouse x
 - Position is saved on first show and reused on timeframe switches (no jumping)
 - `_auto_show_graph` flag: set when timeframe changes so graph re-opens after fetch completes
@@ -83,7 +88,7 @@ Opening the AppIndicator menu causes a focus-out event on the graph window. If a
 When the user picks a new timeframe, the menu closes and the graph window hides (focus-out). By the time the async fetch completes and the graph re-renders, the mouse has moved — causing the graph to pop up in a different location. Solution: pass `reuse_pos=True` to `show_graph()` after a timeframe change so it moves back to `_last_pos`.
 
 ### GdkPixbuf colour channel order
-Cairo renders ARGB32 (native endian: BGRA on little-endian). GdkPixbuf expects RGBA. When converting manually, swap channels. Using matplotlib's PNG output piped through `GdkPixbuf.new_from_stream` avoids this entirely.
+Cairo renders ARGB32 (native endian: BGRA on little-endian). GdkPixbuf expects RGBA. When converting manually, swap channels. Using matplotlib's PNG output piped through `GdkPixbuf.PixbufLoader` avoids this entirely (current approach).
 
-### `render_tray_icon()` is defined twice in graph_renderer.py
-The second definition shadows the first. Keep only one.
+### Coinbase and Kraken OHLCV field order differs
+Coinbase: `[time_s, low, high, open, close, vol]`. Kraken: `[time_s, open, high, low, close, ...]`. Both must be normalised to `[timestamp_ms, open, high, low, close]` in `price_fetcher.py`.

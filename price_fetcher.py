@@ -93,7 +93,7 @@ class PriceFetcher:
             return None, None
 
     # ------------------------------------------------------------------ #
-    #  History (returns [[timestamp_ms, close_price], ...])               #
+    #  History (returns [[timestamp_ms, open, high, low, close], ...])    #
     # ------------------------------------------------------------------ #
 
     def _fetch_history(self, days: int):
@@ -116,8 +116,8 @@ class PriceFetcher:
             candles = r.json()  # [[time_s, low, high, open, close, volume], ...] newest first
             if not candles:
                 return []
-            # Reverse to chronological, return [timestamp_ms, close]
-            return [[c[0] * 1000, c[4]] for c in reversed(candles)]
+            # Reverse to chronological; Coinbase: [time_s, low, high, open, close, vol]
+            return [[c[0] * 1000, c[3], c[2], c[1], c[4]] for c in reversed(candles)]
         except Exception:
             return []
 
@@ -132,7 +132,7 @@ class PriceFetcher:
             data = r.json()
             candles = next(iter(data["result"].values()))
             # [time_s, open, high, low, close, vwap, volume, count]
-            return [[c[0] * 1000, float(c[4])] for c in candles]
+            return [[c[0] * 1000, float(c[1]), float(c[2]), float(c[3]), float(c[4])] for c in candles]
         except Exception:
             return []
 
@@ -143,7 +143,7 @@ if __name__ == "__main__":
         print(f"BTC ${p:,.0f}  {arrow}{abs(c):.2f}%")
 
     def on_history(pts):
-        print(f"History: {len(pts)} points, latest ${pts[-1][1]:,.0f}")
+        print(f"History: {len(pts)} points, latest ${pts[-1][4]:,.0f}")
 
     import gi
     gi.require_version("GLib", "2.0")

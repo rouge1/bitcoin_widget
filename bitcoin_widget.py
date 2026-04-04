@@ -53,6 +53,10 @@ class GraphWindow(Gtk.Window):
         if event.keyval == Gdk.KEY_Escape:
             self.hide()
 
+    def update_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf):
+        """Update the image without stealing focus (for live refreshes)."""
+        self._image.set_from_pixbuf(pixbuf)
+
     def show_graph(self, pixbuf: GdkPixbuf.Pixbuf, reuse_pos=False):
         """Display pixbuf. Repositions only when not reusing a saved position."""
         self._image.set_from_pixbuf(pixbuf)
@@ -76,8 +80,7 @@ class GraphWindow(Gtk.Window):
         self.present()
 
 
-_DIAG_DIR = os.path.join(os.path.expanduser("~"), ".config", "bitcoin-widget")
-SOCKET_PATH = os.path.join(_DIAG_DIR, "diag.sock")
+SOCKET_PATH = str(config._SETTINGS_DIR / "diag.sock")
 
 
 class BitcoinWidget:
@@ -85,15 +88,13 @@ class BitcoinWidget:
         self._diag = diag
         self._sock = None
         self._cached_graph: GdkPixbuf.Pixbuf | None = None
+        self._cached_points = None
         self._graph_days = config.load_graph_days()
+        self._show_candles = config.load_show_candles()
         self._auto_show_graph = False
         self._graph_window = GraphWindow()
 
-        # --- Live price (shared with graph renderer) ---
-        self._live_price = None
-        self._live_change = None
-
-        # --- Diagnostic state ---
+        # --- Diagnostic state (single source of truth for live values) ---
         self._state = {
             "label": {"text": "BTC …", "price": None, "change": None, "updated": None},
             "graph": {"price": None, "change": None, "points": 0, "days": self._graph_days, "updated": None},
@@ -134,12 +135,6 @@ class BitcoinWidget:
 
         menu.append(Gtk.SeparatorMenuItem())
 
-        item_refresh = Gtk.MenuItem(label="Refresh Now")
-        item_refresh.connect("activate", self._on_refresh)
-        menu.append(item_refresh)
-
-        menu.append(Gtk.SeparatorMenuItem())
-
         # Timeframe radio group
         tf_header = Gtk.MenuItem(label="Graph Timeframe")
         tf_header.set_sensitive(False)
@@ -156,10 +151,11 @@ class BitcoinWidget:
 
         menu.append(Gtk.SeparatorMenuItem())
 
-        self._item_autostart = Gtk.CheckMenuItem(label="Start on Login")
-        self._item_autostart.set_active(autostart.is_enabled())
-        self._item_autostart.connect("toggled", self._on_autostart_toggled)
-        menu.append(self._item_autostart)
+        self._item_candle_toggle = Gtk.MenuItem(
+            label="Show Lines" if self._show_candles else "Show Candles"
+        )
+        self._item_candle_toggle.connect("activate", self._on_candles_toggled)
+        menu.append(self._item_candle_toggle)
 
         menu.append(Gtk.SeparatorMenuItem())
 
@@ -178,15 +174,13 @@ class BitcoinWidget:
         arrow = "▲" if change_24h >= 0 else "▼"
         label = f"BTC ${price:,.0f} {arrow}{abs(change_24h):.1f}%"
         self._indicator.set_label(label, "BTC $999,999 ▼99.9%")
-        self._live_price = price
-        self._live_change = change_24h
         now = time.time()
         self._state["label"] = {"text": label, "price": price, "change": round(change_24h, 2), "updated": now}
         self._state["api"] = {"price": price, "change": round(change_24h, 2), "source": self._fetcher.last_price_source, "updated": now}
         return False
 
     def _on_history_update(self, points: list):
-        self._last_history_points = points
+        self._cached_points = points
         threading.Thread(
             target=self._render_graph_bg,
             args=(points, self._graph_days),
@@ -195,30 +189,31 @@ class BitcoinWidget:
         return False
 
     def _render_graph_bg(self, points, days):
+        live_price = self._state["api"]["price"]
+        live_change = self._state["api"]["change"]
         pixbuf = render_graph(points, days=days,
-                              live_price=self._live_price,
-                              live_change=self._live_change)
+                              live_price=live_price,
+                              live_change=live_change,
+                              show_candles=self._show_candles)
         if pixbuf:
-            GLib.idle_add(self._cache_graph, pixbuf, points, days)
-
-    def _cache_graph(self, pixbuf, points=None, days=None):
-        self._cached_graph = pixbuf
-        self._item_show_graph.set_sensitive(True)
-        if points:
-            display_price = self._live_price if self._live_price is not None else points[-1][1]
-            display_change = self._live_change if self._live_change is not None else (
-                (points[-1][1] - points[0][1]) / points[0][1] * 100
-            )
-            self._state["graph"] = {
-                "price": round(display_price, 2),
-                "change": round(display_change, 2),
+            graph_state = {
+                "price": round(live_price, 2) if live_price else round(points[-1][4], 2),
+                "change": round(live_change, 2) if live_change else round((points[-1][4] - points[0][4]) / points[0][4] * 100, 2),
                 "points": len(points),
-                "days": days or self._graph_days,
+                "days": days,
                 "updated": time.time(),
             }
-        if self._auto_show_graph or self._graph_window.get_visible():
+            GLib.idle_add(self._cache_graph, pixbuf, graph_state)
+
+    def _cache_graph(self, pixbuf, graph_state):
+        self._cached_graph = pixbuf
+        self._item_show_graph.set_sensitive(True)
+        self._state["graph"] = graph_state
+        if self._auto_show_graph:
             self._auto_show_graph = False
             self._graph_window.show_graph(pixbuf, reuse_pos=True)
+        elif self._graph_window.get_visible():
+            self._graph_window.update_pixbuf(pixbuf)
         return False
 
     # ------------------------------------------------------------------ #
@@ -235,25 +230,25 @@ class BitcoinWidget:
     #  Menu callbacks                                                      #
     # ------------------------------------------------------------------ #
 
+    def _on_candles_toggled(self, _):
+        self._show_candles = not self._show_candles
+        config.save_show_candles(self._show_candles)
+        self._item_candle_toggle.set_label(
+            "Show Lines" if self._show_candles else "Show Candles"
+        )
+        if self._cached_points:
+            self._on_history_update(self._cached_points)
+
     def _on_timeframe_toggled(self, item, days):
         if item.get_active() and days != self._graph_days:
             self._graph_days = days
             config.save_graph_days(days)
             self._fetcher.set_history_days(days)
             self._cached_graph = None
+            self._cached_points = None
             self._item_show_graph.set_sensitive(False)
             self._auto_show_graph = True
             self._fetcher.refresh()
-
-    def _on_autostart_toggled(self, item):
-        if item.get_active():
-            autostart.enable()
-        else:
-            autostart.disable()
-
-    def _on_refresh(self, _):
-        self._indicator.set_label("BTC ↻ …", "BTC $999,999 ▼99.9%")
-        self._fetcher.refresh()
 
     def _on_quit(self, _):
         self._fetcher.stop()
@@ -264,7 +259,7 @@ class BitcoinWidget:
     # ------------------------------------------------------------------ #
 
     def _start_socket_server(self):
-        os.makedirs(_DIAG_DIR, mode=0o700, exist_ok=True)
+        config._SETTINGS_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
         try:
             os.unlink(SOCKET_PATH)
         except FileNotFoundError:
@@ -290,6 +285,8 @@ class BitcoinWidget:
     # ------------------------------------------------------------------ #
 
     def run(self):
+        if not autostart.is_enabled():
+            autostart.enable()
         self._fetcher.start()
         Gtk.main()
         if self._sock:
