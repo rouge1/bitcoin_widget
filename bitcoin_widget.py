@@ -59,6 +59,10 @@ class GraphWindow(Gtk.Window):
 
     def show_graph(self, pixbuf: GdkPixbuf.Pixbuf, reuse_pos=False):
         """Display pixbuf. Repositions only when not reusing a saved position."""
+        # If visible, capture the live position so user-drags are preserved
+        if self.get_visible():
+            self._last_pos = self.get_position()
+
         self._image.set_from_pixbuf(pixbuf)
         self.resize(pixbuf.get_width(), pixbuf.get_height())
 
@@ -89,17 +93,26 @@ class BitcoinWidget:
         self._sock = None
         self._cached_graph: GdkPixbuf.Pixbuf | None = None
         self._cached_points = None
+        # Per-timeframe cache: {days: (points, pixbuf)} — survives day switches
+        self._tf_cache: dict[int, tuple] = {}
         self._graph_days = config.load_graph_days()
         self._show_candles = config.load_show_candles()
         self._auto_show_graph = False
         self._graph_window = GraphWindow()
 
         # --- Diagnostic state (single source of truth for live values) ---
+        self._debug_log = []
         self._state = {
             "label": {"text": "BTC …", "price": None, "change": None, "updated": None},
             "graph": {"price": None, "change": None, "points": 0, "days": self._graph_days, "updated": None},
             "api": {"price": None, "change": None, "source": None, "updated": None},
         }
+
+        # --- Price fetcher (created before menu so handlers can reference it) ---
+        self._fetcher = PriceFetcher(
+            price_callback=self._on_price_update,
+            history_callback=self._on_history_update,
+        )
 
         # --- AppIndicator ---
         self._indicator = AppIndicator3.Indicator.new(
@@ -111,15 +124,15 @@ class BitcoinWidget:
         self._indicator.set_label("BTC …", "BTC $999,999 ▼99.9%")
         self._indicator.set_menu(self._build_menu())
 
-        # --- Price fetcher ---
-        self._fetcher = PriceFetcher(
-            price_callback=self._on_price_update,
-            history_callback=self._on_history_update,
-        )
-
         # --- Diagnostic socket (only with --diag) ---
         if self._diag:
             self._start_socket_server()
+
+    def _log(self, msg):
+        entry = {"t": round(time.time(), 3), "msg": msg}
+        self._debug_log.append(entry)
+        if len(self._debug_log) > 50:
+            self._debug_log.pop(0)
 
     # ------------------------------------------------------------------ #
     #  Menu                                                                #
@@ -128,25 +141,13 @@ class BitcoinWidget:
     def _build_menu(self):
         menu = Gtk.Menu()
 
-        self._item_show_graph = Gtk.MenuItem(label="Show Graph")
-        self._item_show_graph.connect("activate", self._on_show_graph)
-        self._item_show_graph.set_sensitive(False)  # until graph is ready
-        menu.append(self._item_show_graph)
-
-        menu.append(Gtk.SeparatorMenuItem())
-
-        # Timeframe radio group
-        tf_header = Gtk.MenuItem(label="Graph Timeframe")
-        tf_header.set_sensitive(False)
-        menu.append(tf_header)
-
         group = []
         for label, days in [("1 Day", 1), ("7 Days", 7), ("30 Days", 30)]:
             item = Gtk.RadioMenuItem.new_with_label(group, label)
             group = item.get_group()
             if days == self._graph_days:
                 item.set_active(True)
-            item.connect("toggled", self._on_timeframe_toggled, days)
+            item.connect("activate", self._on_timeframe_activated, days)
             menu.append(item)
 
         menu.append(Gtk.SeparatorMenuItem())
@@ -165,6 +166,16 @@ class BitcoinWidget:
 
         menu.show_all()
         return menu
+
+    def _toggle_graph(self):
+        visible = self._graph_window.get_visible()
+        has_graph = self._cached_graph is not None
+        self._log(f"toggle_graph visible={visible} has_cached={has_graph}")
+        if visible:
+            self._graph_window.hide()
+        elif has_graph:
+            self._graph_window.show_graph(self._cached_graph, reuse_pos=False)
+        return False
 
     # ------------------------------------------------------------------ #
     #  Price / history callbacks (run on GTK main thread via idle_add)    #
@@ -207,24 +218,19 @@ class BitcoinWidget:
 
     def _cache_graph(self, pixbuf, graph_state):
         self._cached_graph = pixbuf
-        self._item_show_graph.set_sensitive(True)
+        days = graph_state["days"]
+        self._tf_cache[days] = (self._cached_points, pixbuf)
+        self._log(f"cache_graph days={days} points={graph_state['points']}")
         self._state["graph"] = graph_state
+        # Only update the visible window if this render is for the *current* timeframe
+        if days != self._graph_days:
+            return False
         if self._auto_show_graph:
             self._auto_show_graph = False
             self._graph_window.show_graph(pixbuf, reuse_pos=True)
         elif self._graph_window.get_visible():
             self._graph_window.update_pixbuf(pixbuf)
         return False
-
-    # ------------------------------------------------------------------ #
-    #  Graph popup                                                         #
-    # ------------------------------------------------------------------ #
-
-    def _on_show_graph(self, _):
-        if self._graph_window.get_visible():
-            self._graph_window.hide()
-        elif self._cached_graph:
-            self._graph_window.show_graph(self._cached_graph, reuse_pos=False)
 
     # ------------------------------------------------------------------ #
     #  Menu callbacks                                                      #
@@ -236,6 +242,8 @@ class BitcoinWidget:
         self._item_candle_toggle.set_label(
             "Show Lines" if self._show_candles else "Show Candles"
         )
+        # Invalidate cached pixbufs (rendered with old style) but keep points
+        self._tf_cache.clear()
         if self._cached_points:
             threading.Thread(
                 target=self._render_graph_bg,
@@ -243,16 +251,26 @@ class BitcoinWidget:
                 daemon=True,
             ).start()
 
-    def _on_timeframe_toggled(self, item, days):
-        if item.get_active() and days != self._graph_days:
+    def _on_timeframe_activated(self, item, days):
+        if days != self._graph_days:
             self._graph_days = days
             config.save_graph_days(days)
             self._fetcher.set_history_days(days)
-            self._cached_graph = None
-            self._cached_points = None
-            self._item_show_graph.set_sensitive(False)
-            self._auto_show_graph = True
+            cached = self._tf_cache.get(days)
+            if cached:
+                # Show cached instantly, then refresh in background
+                self._cached_points, self._cached_graph = cached
+                reuse = self._graph_window.get_visible()
+                self._graph_window.show_graph(self._cached_graph, reuse_pos=reuse)
+                self._auto_show_graph = False
+            else:
+                self._cached_graph = None
+                self._cached_points = None
+                self._auto_show_graph = True
             self._fetcher.refresh()
+        elif self._cached_graph is not None:
+            reuse = self._graph_window.get_visible()
+            self._graph_window.show_graph(self._cached_graph, reuse_pos=reuse)
 
     def _on_quit(self, _):
         self._fetcher.stop()
@@ -279,7 +297,9 @@ class BitcoinWidget:
             try:
                 conn, _ = self._sock.accept()
                 with conn:
-                    response = json.dumps(self._state, indent=2) + "\n"
+                    out = dict(self._state)
+                    out["debug_log"] = list(self._debug_log)
+                    response = json.dumps(out, indent=2) + "\n"
                     conn.sendall(response.encode())
             except OSError:
                 break
