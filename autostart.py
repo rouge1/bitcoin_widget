@@ -34,10 +34,6 @@ def disable():
         DESKTOP_FILE.unlink()
 
 
-def is_enabled() -> bool:
-    return DESKTOP_FILE.exists()
-
-
 if __name__ == "__main__":
     enable()
     print(f"Autostart enabled: {DESKTOP_FILE}")

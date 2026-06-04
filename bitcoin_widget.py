@@ -94,12 +94,7 @@ _lock_sock = None
 
 
 def acquire_single_instance() -> bool:
-    """Return True if we are the only instance; False if one is already running.
-
-    Binding an abstract unix socket is atomic and kernel-backed: the second
-    process's bind() fails with EADDRINUSE, so it can exit before drawing a
-    duplicate tray icon. The socket is kept referenced for the process lifetime.
-    """
+    """Return True if we are the only instance; False if one is already running."""
     global _lock_sock
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
