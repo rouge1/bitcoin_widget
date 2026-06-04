@@ -86,6 +86,30 @@ class GraphWindow(Gtk.Window):
 
 SOCKET_PATH = str(config._SETTINGS_DIR / "diag.sock")
 
+# Abstract-namespace socket name (leading NUL) used purely as a single-instance
+# lock. Abstract sockets are released automatically when the process exits, so
+# there is no stale file to clean up after a crash.
+_LOCK_ADDR = "\0bitcoin-widget.lock"
+_lock_sock = None
+
+
+def acquire_single_instance() -> bool:
+    """Return True if we are the only instance; False if one is already running.
+
+    Binding an abstract unix socket is atomic and kernel-backed: the second
+    process's bind() fails with EADDRINUSE, so it can exit before drawing a
+    duplicate tray icon. The socket is kept referenced for the process lifetime.
+    """
+    global _lock_sock
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.bind(_LOCK_ADDR)
+    except OSError:
+        sock.close()
+        return False
+    _lock_sock = sock  # keep alive so the lock is held until exit
+    return True
+
 
 class BitcoinWidget:
     def __init__(self, diag=False):
@@ -309,7 +333,7 @@ class BitcoinWidget:
     # ------------------------------------------------------------------ #
 
     def run(self):
-        if not autostart.is_enabled():
+        if not autostart._is_current():
             autostart.enable()
         self._fetcher.start()
         Gtk.main()
@@ -326,5 +350,8 @@ if __name__ == "__main__":
     parser.add_argument("--diag", action="store_true",
                         help="Enable diagnostic socket at ~/.config/bitcoin-widget/diag.sock")
     args = parser.parse_args()
+    if not acquire_single_instance():
+        print("bitcoin-widget is already running; exiting.", file=sys.stderr)
+        sys.exit(0)
     app = BitcoinWidget(diag=args.diag)
     app.run()

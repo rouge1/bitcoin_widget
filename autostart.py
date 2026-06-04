@@ -16,7 +16,12 @@ Icon=utilities-system-monitor
 Comment=Bitcoin price in system tray
 X-GNOME-Autostart-enabled=true
 StartupNotify=false
+NoDisplay=true
 """
+
+
+def _is_current() -> bool:
+    return DESKTOP_FILE.exists() and DESKTOP_FILE.read_text() == _desktop_content()
 
 
 def enable():
