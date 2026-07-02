@@ -9,15 +9,34 @@ def _get(url, **kwargs):
     return requests.get(url, timeout=8, **kwargs)
 
 
+def _sparkline(result, n=config.SPARK_POINTS):
+    """Downsample a Yahoo chart result's intraday closes to ~n points for a
+    ticker sparkline. Drops nulls (gaps / pre-open); returns [] if too sparse."""
+    try:
+        closes = [c for c in result["indicators"]["quote"][0]["close"] if c is not None]
+    except (KeyError, IndexError, TypeError):
+        return []
+    if len(closes) < 3:
+        return closes
+    if len(closes) <= n:
+        return [round(float(c), 4) for c in closes]
+    step = len(closes) / n
+    return [round(float(closes[min(len(closes) - 1, int(i * step))]), 4) for i in range(n)]
+
+
 class PriceFetcher:
-    def __init__(self, price_callback, history_callback):
+    def __init__(self, price_callback, history_callback, stocks_callback=None):
         self._price_cb = price_callback
         self._history_cb = history_callback
+        self._stocks_cb = stocks_callback
         self._stop = threading.Event()
         self._stopped = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._history_days = config.GRAPH_HISTORY_DAYS
+        self._last_stock_fetch = 0.0
+        self._last_block_fetch = 0.0
         self.last_price_source = None
+        self.last_block_height = None   # BTC chain tip, for the "as of · block" line
 
     def start(self):
         self._thread.start()
@@ -50,6 +69,15 @@ class PriceFetcher:
         price, change = self._fetch_price()
         if price is not None:
             GLib.idle_add(self._price_cb, price, change)
+
+        self._maybe_fetch_block()   # cheap, throttled; feeds the "as of · block" line
+
+        # Stocks are delivered before history so the widget has fresh quotes
+        # cached by the time the history callback kicks off the graph render.
+        if self._stocks_cb is not None:
+            quotes = self._fetch_stocks()
+            if quotes:
+                GLib.idle_add(self._stocks_cb, quotes)
 
         points = self._fetch_history(self._history_days)
         if points:
@@ -91,6 +119,20 @@ class PriceFetcher:
             return last, change
         except Exception:
             return None, None
+
+    def _maybe_fetch_block(self):
+        """Refresh the BTC chain tip height (throttled). Best-effort — on any
+        failure we simply keep the last-known height (or None)."""
+        now = time.time()
+        if now - self._last_block_fetch < config.BLOCK_MIN_INTERVAL:
+            return
+        try:
+            r = _get(config.MEMPOOL_HEIGHT_URL)
+            r.raise_for_status()
+            self.last_block_height = int(r.text.strip())
+            self._last_block_fetch = now
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     #  History (returns [[timestamp_ms, open, high, low, close], ...])    #
@@ -135,6 +177,42 @@ class PriceFetcher:
             return [[c[0] * 1000, float(c[1]), float(c[2]), float(c[3]), float(c[4])] for c in candles]
         except Exception:
             return []
+
+    # ------------------------------------------------------------------ #
+    #  Related equities (Yahoo Finance) — {symbol: (price, change_pct)}   #
+    # ------------------------------------------------------------------ #
+
+    def _fetch_stocks(self):
+        """Return {symbol: (price, change_pct, spark)} for successfully fetched
+        symbols, or None if throttled / nothing fetched. `spark` is a short list
+        of intraday closes for the ticker sparkline. Throttled so a fast crypto
+        poll interval doesn't hammer Yahoo — equities move slowly."""
+        now = time.time()
+        if now - self._last_stock_fetch < config.STOCK_MIN_INTERVAL:
+            return None
+        quotes = {}
+        for symbol in config.STOCK_SYMBOLS:
+            q = self._yahoo_quote(symbol)
+            if q is not None:
+                quotes[symbol] = q
+        if quotes:
+            self._last_stock_fetch = now  # only reset on success, so failures retry
+        return quotes or None
+
+    def _yahoo_quote(self, symbol):
+        try:
+            url = config.YAHOO_QUOTE_URL.format(symbol=symbol)
+            r = _get(url, headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+            result = r.json()["chart"]["result"][0]
+            meta = result["meta"]
+            price = float(meta["regularMarketPrice"])
+            prev = float(meta.get("chartPreviousClose") or meta["previousClose"])
+            change = (price - prev) / prev * 100
+            spark = _sparkline(result)
+            return price, change, spark
+        except Exception:
+            return None
 
 
 if __name__ == "__main__":

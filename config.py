@@ -45,23 +45,32 @@ def save_show_candles(enabled: bool):
 TRAY_ICON_WIDTH = 150
 TRAY_ICON_HEIGHT = 24
 
-GRAPH_WIDTH = 420
-GRAPH_HEIGHT = 230
+GRAPH_WIDTH = 440         # chart image rendered by matplotlib (plot only, no header)
+GRAPH_HEIGHT = 240
+# The popup is a WebKit page (see web/widget.html + web_window.py): HTML header +
+# chart image + a requestAnimationFrame ticker. These are the window's outer size.
+WEB_WIDTH = 452
+WEB_HEIGHT = 320
 
-FONT_FACE = "Monospace"
-FONT_SIZE = 11
+# --- "Treasury Terminal" palette ---
+GRAPH_LINE_COLOR = "#F7931A"   # Bitcoin orange — the single loud accent
+GRAPH_BG_COLOR   = "#0C0D11"   # graphite base (figure facecolor)
+GRAPH_BG_TOP     = "#0C0D11"   # background gradient: top …
+GRAPH_BG_BOTTOM  = "#15171E"   # … to slightly warmer graphite at the bottom
+GRAPH_POS   = "#37D6A0"   # positive change (mint)
+GRAPH_NEG   = "#FB6E7E"   # negative change (coral)
+GRAPH_TEXT  = "#ECE8DF"   # primary text (warm off-white)
+GRAPH_MUTE  = "#767B86"   # axis / secondary labels
+GRAPH_HAIR  = "#22252E"   # hairline grid + dividers
 
-# Colors (R, G, B) 0.0–1.0
-TEXT_COLOR  = (1.0,  1.0,  1.0)
-UP_COLOR    = (0.2,  0.88, 0.2)
-DOWN_COLOR  = (0.95, 0.3,  0.3)
+CANDLE_UP_COLOR   = GRAPH_POS
+CANDLE_DOWN_COLOR = GRAPH_NEG
+CANDLE_WICK_WIDTH = 0.9
 
-GRAPH_LINE_COLOR = "#F7931A"   # Bitcoin orange
-GRAPH_BG_COLOR   = "#111111"
-
-CANDLE_UP_COLOR   = "#26a69a"
-CANDLE_DOWN_COLOR = "#ef5350"
-CANDLE_WICK_WIDTH = 1.0
+# Type: Ubuntu (humanist sans, distinctive) for labels, Ubuntu Mono for data.
+# Lists give a graceful fallback if the preferred face isn't installed.
+GRAPH_DISPLAY_FONT = ["Ubuntu", "DejaVu Sans", "sans-serif"]
+GRAPH_MONO_FONT    = ["Ubuntu Mono", "DejaVu Sans Mono", "monospace"]
 
 # Coinbase (primary)
 COINBASE_STATS_URL  = "https://api.exchange.coinbase.com/products/BTC-USD/stats"
@@ -73,3 +82,19 @@ COINBASE_CANDLES_URL = (
 # Kraken (fallback)
 KRAKEN_TICKER_URL  = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD"
 KRAKEN_OHLC_URL    = "https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval={interval}&since={since}"
+
+# BTC chain tip height for the header "as of · block" ledger line (mempool.space,
+# no key; returns the height as plain text). Blocks arrive ~10 min apart.
+MEMPOOL_HEIGHT_URL = "https://mempool.space/api/blocks/tip/height"
+BLOCK_MIN_INTERVAL = 120   # seconds between tip-height fetches
+
+# Related equities shown on the graph (price + 24h change from previous close).
+# Yahoo Finance v8 chart endpoint — no API key required.
+STOCK_SYMBOLS = ["MSTR", "STRC"]
+STOCK_MIN_INTERVAL = 60   # seconds; equities move slower than crypto — be gentle on Yahoo
+SPARK_POINTS = 32         # intraday closes kept per equity for the ticker sparkline
+# range=1d&interval=5m gives ~78 intraday closes (for the sparkline) alongside
+# meta.regularMarketPrice / chartPreviousClose (for the price + % change).
+YAHOO_QUOTE_URL = (
+    "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=5m"
+)

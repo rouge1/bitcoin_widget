@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root{
+    --ink:#0c0d11; --ink2:#15171e; --gold:#f7931a; --paper:#ece8df;
+    --mute:#767b86; --pos:#37d6a0; --neg:#fb6e7e; --hair:#22252e;
+    --face-label:"Ubuntu Condensed","Ubuntu","DejaVu Sans",sans-serif;
+    --face-data:"Source Code Pro","DejaVu Sans Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--ink);color:var(--paper);
+    font-family:var(--face-label);overflow:hidden;
+    user-select:none;cursor:default;-webkit-font-smoothing:antialiased}
+  .app{display:flex;flex-direction:column;height:100%;
+    background:linear-gradient(180deg,#101218 0%, var(--ink) 46%)}
+
+  /* header — eyebrow row + price hero, under a ledger hairline */
+  .head{display:flex;flex-direction:column;gap:2px;padding:9px 15px 7px;
+    border-bottom:1px solid var(--hair)}
+  .eyebrow{display:flex;align-items:center;justify-content:space-between}
+  .pair{font-family:var(--face-label);font-size:10.5px;font-weight:600;
+    letter-spacing:1.7px;text-transform:uppercase;color:var(--gold)}
+  .pair .u{color:var(--mute);font-weight:600;opacity:1}
+  .hero{display:flex;align-items:flex-end;gap:9px}
+  .hero .px{font-family:var(--face-data);font-size:28px;font-weight:600;
+    letter-spacing:.2px;color:var(--paper);line-height:1.12;
+    display:inline-flex;align-items:flex-end}
+  .hero .ch{font-family:var(--face-data);font-size:13px;font-weight:600}
+  .hero .ch.pos{color:var(--pos)} .hero .ch.neg{color:var(--neg)}
+  .hero .na{color:var(--mute)}
+  .meta{display:flex;align-items:baseline;gap:10px}
+  .asof{font-family:var(--face-label);font-size:9px;font-weight:600;letter-spacing:1.4px;
+    text-transform:uppercase;color:var(--mute);transition:opacity .25s}
+  .asof.stale{opacity:.4}
+  .asof b{color:var(--paper);font-weight:600}
+  .tf{font-family:var(--face-data);font-size:10.5px;font-weight:600;
+    color:var(--paper);letter-spacing:.5px}
+
+  /* chart (canvas, drawn in JS) */
+  .chart{flex:1;min-height:0;position:relative;margin:0 6px}
+  .chart canvas{display:block;width:100%;height:100%}
+  .tip{position:absolute;left:0;top:0;pointer-events:none;opacity:0;
+    transition:opacity .12s ease;transform:translate(-50%,0);z-index:6;
+    background:rgba(10,11,15,.9);border:1px solid var(--hair);border-radius:6px;
+    padding:4px 8px;font-family:var(--face-data);
+    font-size:11px;line-height:1.35;white-space:nowrap;
+    box-shadow:0 8px 20px rgba(0,0,0,.5)}
+  .tip.on{opacity:1}
+  .tip .t{color:var(--mute)} .tip .p{color:var(--paper);font-weight:700}
+
+  /* ticker tape — the "proxies" chyron: a fixed label + scrolling equities */
+  .tape-wrap{height:38px;border-top:1px solid var(--hair);display:flex;align-items:stretch}
+  .tape-label{flex:0 0 auto;display:flex;align-items:center;padding:0 13px 0 15px;
+    font-family:var(--face-label);font-size:8.5px;font-weight:600;letter-spacing:2.2px;
+    text-transform:uppercase;color:var(--mute);border-right:1px solid var(--hair)}
+  .tape-view{position:relative;flex:1 1 auto;overflow:hidden;
+    -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 5%,#000 88%,transparent 100%)}
+  .tape{position:absolute;top:0;left:0;height:100%;display:flex;align-items:center;
+    white-space:nowrap;will-change:transform}
+  .q{display:inline-flex;align-items:center;gap:7px;padding:0 16px;
+    font-family:var(--face-data);font-size:12.5px}
+  .q .sym{font-family:var(--face-label);font-weight:600;
+    font-size:11px;letter-spacing:1px;text-transform:uppercase}
+  .q .sym.btc{color:var(--gold)} .q .sym.eq{color:var(--mute)}
+  .q .spark-box{width:42px;height:15px;display:inline-flex;align-items:center;justify-content:center}
+  .q .spark{width:42px;height:15px;opacity:.92}
+  .q .px{color:var(--paper);display:inline-flex}
+  .q .ch.pos{color:var(--pos)} .q .ch.neg{color:var(--neg)}
+  .q .na{color:var(--mute)}
+  .sep{color:var(--hair);padding:0 2px;font-size:13px}
+
+  /* odometer digit roll — .slot is a fixed-height window; the two digits stack
+     vertically inside .roll (a div, so the .slot>span rule can't flatten it) and
+     .roll slides by exactly one digit height. */
+  .slot{position:relative;display:inline-block;height:1.15em;line-height:1.15em;
+    overflow:hidden;vertical-align:bottom}
+  .slot > span{display:block;height:1.15em;line-height:1.15em;text-align:center}
+  .roll{display:block;transition:transform .42s cubic-bezier(.32,.9,.28,1)}
+  .roll > span{display:block;height:1.15em;line-height:1.15em;text-align:center}
+  .px.up{animation:flashUp .55s ease-out}
+  .px.down{animation:flashDn .55s ease-out}
+  @keyframes flashUp{0%{color:var(--pos)}100%{color:var(--paper)}}
+  @keyframes flashDn{0%{color:var(--neg)}100%{color:var(--paper)}}
+</style>
+</head>
+<body>
+  <div class="app">
+    <div class="head">
+      <div class="eyebrow">
+        <span class="pair">BTC<span class="u">/USD</span></span>
+        <span class="meta">
+          <span class="asof" id="asof">as of —</span>
+          <span class="tf" id="tf">24H</span>
+        </span>
+      </div>
+      <div class="hero">
+        <span class="px" id="price"></span>
+        <span class="ch" id="heroch"></span>
+      </div>
+    </div>
+    <div class="chart" id="chartWrap">
+      <canvas id="chart"></canvas>
+      <div class="tip" id="tip"></div>
+    </div>
+    <div class="tape-wrap"><span class="tape-label">Proxies</span><div class="tape-view"><div class="tape" id="tape"></div></div></div>
+  </div>
+
+<script>
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const C = {
+    gold:"#f7931a", paper:"#ece8df", mute:"#767b86",
+    pos:"#37d6a0", neg:"#fb6e7e", hair:"#22252e",
+  };
+  const fmt = (n, d) => n.toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
+  const money = (p) => p >= 1000 ? "$" + fmt(p, 0) : "$" + fmt(p, 2);
+  const kfmt = (v) => v >= 1000 ? (v/1000).toFixed(v >= 100000 ? 0 : 1).replace(/\.0$/,"") + "k"
+                                : v.toFixed(0);
+  const ease = (t) => 1 - Math.pow(1 - t, 3);       // easeOutCubic
+
+  /* ================================================================= *
+   *  CHART — a canvas we draw ourselves: crisp (DPR-scaled), with a    *
+   *  hover crosshair + tooltip and a left-to-right entrance reveal.    *
+   * ================================================================= */
+  const canvas = $("chart"), ctx = canvas.getContext("2d"), tip = $("tip");
+  let S = null;                       // {pts:[[ts,o,h,l,c]...], days, candles}
+  let W = 0, H = 0, dpr = 1;
+  let PL = 0, PT = 0, PW = 0, PH = 0; // plot rect (css px)
+  let y0 = 0, y1 = 0;                 // padded price range
+  let prog = 1, animing = false;      // entrance reveal progress
+  let hoverOn = false, hoverX = 0, rafPending = false, pinned = false;
+
+  function resize(){
+    const r = canvas.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = Math.max(1, r.width); H = Math.max(1, r.height);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    PL = 34; PT = 10; PW = W - PL - 8; PH = H - PT - 20;
+  }
+
+  const X = (i) => PL + PW * (S.pts.length > 1 ? i/(S.pts.length-1) : 0.5);
+  const Y = (v) => PT + PH * (1 - (v - y0)/(y1 - y0 || 1));
+
+  function computeRange(){
+    const p = S.pts;
+    let lo, hi;
+    if (S.candles){ lo = Math.min(...p.map(c=>c[3])); hi = Math.max(...p.map(c=>c[2])); }
+    else { const cl = p.map(c=>c[4]); lo = Math.min(...cl); hi = Math.max(...cl); }
+    const span = (hi - lo) || Math.abs(hi)*0.01 || 1;
+    y0 = lo - span*0.10; y1 = hi + span*0.13;
+    return [lo, hi];
+  }
+
+  function niceTicks(lo, hi, want){
+    const span = (hi - lo) || 1;
+    const raw = span / want;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+    const out = [];
+    for (let v = Math.ceil(lo/step)*step; v <= hi + 1e-6; v += step) out.push(v);
+    return out;
+  }
+
+  function fmtX(ts){
+    const d = new Date(ts);
+    if (S.days <= 1) return d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false});
+    if (S.days <= 7) return d.toLocaleDateString("en-US",{weekday:"short"});
+    return d.toLocaleDateString("en-US",{month:"short",day:"numeric"});
+  }
+  function fmtTip(ts){
+    const d = new Date(ts);
+    const t = d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false});
+    if (S.days <= 1) return t;
+    if (S.days <= 7) return d.toLocaleDateString("en-US",{weekday:"short"}) + " " + t;
+    return d.toLocaleDateString("en-US",{month:"short",day:"numeric"});
+  }
+
+  function draw(){
+    if (!S || !S.pts.length){ ctx.clearRect(0,0,W,H); return; }
+    const reveal = animing ? prog : 1;
+    ctx.clearRect(0, 0, W, H);
+    ctx.textBaseline = "middle";
+    ctx.font = '9px "Source Code Pro","DejaVu Sans Mono",monospace';
+
+    // --- grid + axis labels ---
+    const [lo, hi] = [Math.min(...S.pts.map(c=>S.candles?c[3]:c[4])),
+                      Math.max(...S.pts.map(c=>S.candles?c[2]:c[4]))];
+    ctx.strokeStyle = C.hair; ctx.lineWidth = 0.7; ctx.fillStyle = C.mute;
+    for (const v of niceTicks(lo, hi, 4)){
+      const yy = Y(v);
+      if (yy < PT-1 || yy > PT+PH+1) continue;
+      ctx.beginPath(); ctx.moveTo(PL, yy); ctx.lineTo(PL+PW, yy); ctx.stroke();
+      ctx.textAlign = "right"; ctx.fillText(kfmt(v), PL-6, yy);
+    }
+    ctx.textAlign = "center";
+    const n = S.pts.length, xt = 4;
+    for (let k=0; k<=xt; k++){
+      const idx = Math.round(k/xt*(n-1));
+      ctx.fillText(fmtX(S.pts[idx][0]), Math.min(Math.max(X(idx),PL+10),PL+PW-10), PT+PH+11);
+    }
+
+    // --- series (clipped to the reveal region for the entrance sweep) ---
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(PL-1, PT-6, (PW+2)*reveal, PH+12);
+    ctx.clip();
+    if (S.candles) drawCandles(reveal); else drawLine();
+    ctx.restore();
+
+    // --- live node at the latest point (once the sweep reaches it) ---
+    if (reveal > 0.985){
+      const lx = X(n-1), ly = Y(S.pts[n-1][4]);
+      ctx.beginPath(); ctx.fillStyle = "rgba(247,147,26,0.16)";
+      ctx.arc(lx, ly, 9, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.fillStyle = "rgba(247,147,26,0.95)";
+      ctx.arc(lx, ly, 3, 0, 7); ctx.fill();
+    }
+
+    if (hoverOn) drawHover(); else tip.classList.remove("on");
+  }
+
+  function drawLine(){
+    const p = S.pts, n = p.length;
+    // glow fill under the line
+    ctx.beginPath();
+    ctx.moveTo(X(0), Y(p[0][4]));
+    for (let i=1;i<n;i++) ctx.lineTo(X(i), Y(p[i][4]));
+    ctx.lineTo(X(n-1), PT+PH); ctx.lineTo(X(0), PT+PH); ctx.closePath();
+    const g = ctx.createLinearGradient(0, PT, 0, PT+PH);
+    g.addColorStop(0, "rgba(247,147,26,0.32)");
+    g.addColorStop(1, "rgba(247,147,26,0)");
+    ctx.fillStyle = g; ctx.fill();
+    // the line
+    ctx.beginPath();
+    ctx.moveTo(X(0), Y(p[0][4]));
+    for (let i=1;i<n;i++) ctx.lineTo(X(i), Y(p[i][4]));
+    ctx.strokeStyle = C.gold; ctx.lineWidth = 1.9;
+    ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.stroke();
+  }
+
+  // Aggregate raw candles into ~target buckets of real OHLC (first open, last
+  // close, bucket high/low) so 288 5-min bars don't become a 1px picket fence.
+  function aggregate(pts, target){
+    const n = pts.length;
+    if (n <= target) return pts.map(p => [p[0], p[1], p[2], p[3], p[4]]);
+    const bucket = Math.ceil(n / target), out = [];
+    for (let i=0;i<n;i+=bucket){
+      const sl = pts.slice(i, i + bucket);
+      let hi = -Infinity, lo = Infinity;
+      for (const q of sl){ if (q[2] > hi) hi = q[2]; if (q[3] < lo) lo = q[3]; }
+      out.push([sl[0][0], sl[0][1], hi, lo, sl[sl.length - 1][4]]);
+    }
+    return out;
+  }
+
+  function drawCandles(reveal){
+    const p = S.cagg || S.pts, n = p.length;
+    const bw = Math.max(2, (PW / Math.max(n, 1)) * 0.68);
+    const cx = (i) => PL + PW * (n > 1 ? i/(n-1) : 0.5);
+    for (let i=0;i<n;i++){
+      const o = p[i][1], h = p[i][2], l = p[i][3], c = p[i][4], x = cx(i);
+      const up = c >= o, col = up ? C.pos : C.neg;
+      const yo = Y(o), yc = Y(c), mid = (yo+yc)/2;
+      const half = Math.max(0.5, Math.abs(yc-yo)/2) * (animing ? reveal : 1);
+      ctx.globalAlpha = animing ? reveal : 1;
+      ctx.strokeStyle = col; ctx.lineWidth = Math.min(1.2, bw * 0.3);
+      ctx.beginPath(); ctx.moveTo(x, Y(h)); ctx.lineTo(x, Y(l)); ctx.stroke();
+      ctx.fillStyle = col;
+      ctx.fillRect(x - bw/2, mid - half, bw, Math.max(1, half*2));
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawHover(){
+    const n = S.pts.length;
+    let idx = Math.round((hoverX - PL)/PW*(n-1));
+    idx = Math.max(0, Math.min(n-1, idx));
+    if (hoverX < PL-4 || hoverX > PL+PW+4){ hoverOn = false; tip.classList.remove("on"); return; }
+    const x = X(idx), c = S.pts[idx][4], y = Y(c);
+    ctx.save();
+    ctx.strokeStyle = "rgba(118,123,134,0.55)"; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(x, PT); ctx.lineTo(x, PT+PH); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.fillStyle = pinned ? C.gold : "rgba(12,13,17,1)"; ctx.arc(x, y, 4.2, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.strokeStyle = C.gold; ctx.lineWidth = 1.6; ctx.arc(x, y, 4.2, 0, 7); ctx.stroke();
+    ctx.restore();
+    tip.innerHTML = '<span class="t">'+fmtTip(S.pts[idx][0])+'</span> &nbsp;<span class="p">'+money(c)+'</span>';
+    const tw = tip.offsetWidth || 70;
+    const tx = Math.min(Math.max(x, PL + tw/2), PL+PW - tw/2);
+    tip.style.left = tx + "px";
+    tip.style.top = Math.max(PT+2, y - 34) + "px";
+    tip.classList.add("on");
+  }
+
+  function scheduleDraw(){
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => { rafPending = false; draw(); });
+  }
+
+  function animateIn(){
+    let start = null;
+    animing = true;
+    (function step(ts){
+      if (start === null) start = ts;
+      prog = ease(Math.min(1, (ts - start) / 640));
+      draw();
+      if (prog < 1) requestAnimationFrame(step); else { animing = false; draw(); }
+    })(performance.now());
+  }
+
+  canvas.addEventListener("mousemove", (e) => {
+    if (pinned) return;                         // frozen on the pinned point
+    const r = canvas.getBoundingClientRect();
+    hoverX = e.clientX - r.left; hoverOn = true; scheduleDraw();
+  });
+  canvas.addEventListener("mouseleave", () => { if (!pinned){ hoverOn = false; scheduleDraw(); } });
+  canvas.addEventListener("click", (e) => {
+    e.stopPropagation();                        // don't let the body-click hide the window
+    const r = canvas.getBoundingClientRect(), cxp = e.clientX - r.left;
+    if (pinned || cxp < PL || cxp > PL + PW){ pinned = false; hoverOn = false; }  // unpin / ignore off-plot
+    else { pinned = true; hoverOn = true; hoverX = cxp; }
+    scheduleDraw();
+  });
+
+  /* ================================================================= *
+   *  TICKER — rAF scroll (constant px/sec, seamless wrap), with        *
+   *  odometer digit-rolls on price change and a per-row sparkline.     *
+   * ================================================================= */
+  const SPEED = 46;
+  const tape = $("tape");
+  let x = 0, setW = 0, last = 0;
+  let builtSyms = "";
+  const lastPrice = {};
+
+  function sparkSVG(vals, up){
+    if (!vals || vals.length < 2) return "";
+    const w = 42, h = 15, pad = 2, n = vals.length;
+    const mn = Math.min(...vals), mx = Math.max(...vals), rng = (mx - mn) || 1;
+    const xy = vals.map((v,i) => {
+      const px = pad + (w - 2*pad) * i/(n-1);
+      const py = pad + (h - 2*pad) * (1 - (v - mn)/rng);
+      return px.toFixed(1) + "," + py.toFixed(1);
+    });
+    const col = up ? C.pos : C.neg, e = xy[xy.length-1].split(",");
+    return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'
+         + '<polyline points="'+xy.join(" ")+'" fill="none" stroke="'+col+'" stroke-width="1.3" '
+         + 'vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>'
+         + '<circle cx="'+e[0]+'" cy="'+e[1]+'" r="1.6" fill="'+col+'"/></svg>';
+  }
+
+  function cellHTML(q){
+    const symCls = q.sym === "BTC" ? "btc" : "eq";
+    const up = (q.change ?? 0) >= 0, dir = up ? "pos" : "neg";
+    const sparkInner = q.spark ? sparkSVG(q.spark, up) : "";
+    const priceInner = q.price == null ? '<span class="na">n/a</span>' : money(q.price);
+    const chInner = (q.price == null || q.change == null) ? ""
+                  : (up ? "+" : "−") + Math.abs(q.change).toFixed(1) + "%";
+    // Always emit the spark-box / .ch placeholders so an n/a→data transition can
+    // fill them in place (the tape only rebuilds when the symbol *set* changes).
+    return '<span class="q">'
+         + '<span class="sym '+symCls+'">'+q.sym+'</span>'
+         + '<span class="spark-box" data-sym="'+q.sym+'">'+sparkInner+'</span>'
+         + '<span class="px" data-sym="'+q.sym+'">'+priceInner+'</span>'
+         + '<span class="ch '+dir+'" data-sym="'+q.sym+'">'+chInner+'</span></span>';
+  }
+
+  function buildSlots(el, text){
+    el.textContent = "";
+    for (const ch of text){
+      const slot = document.createElement("span");
+      slot.className = "slot"; slot.dataset.char = ch;
+      const s = document.createElement("span"); s.textContent = ch;
+      slot.appendChild(s); el.appendChild(slot);
+    }
+  }
+
+  function rollSlot(slot, ch, dir){
+    const roll = document.createElement("div");
+    roll.className = "roll";
+    const a = document.createElement("span"), b = document.createElement("span");
+    if (dir >= 0){ a.textContent = slot.dataset.char; b.textContent = ch; }
+    else { a.textContent = ch; b.textContent = slot.dataset.char; }
+    roll.appendChild(a); roll.appendChild(b);
+    slot.textContent = ""; slot.appendChild(roll);
+    roll.style.transform = dir >= 0 ? "translateY(0)" : "translateY(-50%)";
+    void roll.offsetHeight;                                   // reflow → transition
+    roll.style.transform = dir >= 0 ? "translateY(-50%)" : "translateY(0)";
+    const done = () => {
+      roll.removeEventListener("transitionend", done);
+      slot.dataset.char = ch;
+      const s = document.createElement("span"); s.textContent = ch;
+      slot.textContent = ""; slot.appendChild(s);
+    };
+    roll.addEventListener("transitionend", done);
+  }
+
+  function applyRoll(el, text, dir){
+    const slots = el.children;
+    const same = slots.length === text.length &&
+                 Array.from(slots).every(s => s.classList.contains("slot"));
+    if (!same){ buildSlots(el, text); }
+    else {
+      for (let i=0;i<text.length;i++){
+        const slot = slots[i], ch = text[i];
+        if (slot.dataset.char === ch) continue;
+        if (/\d/.test(ch) && /\d/.test(slot.dataset.char)) rollSlot(slot, ch, dir);
+        else { slot.dataset.char = ch; slot.textContent = "";
+               const s = document.createElement("span"); s.textContent = ch; slot.appendChild(s); }
+      }
+    }
+    el.classList.remove("up","down"); void el.offsetWidth;
+    el.classList.add(dir >= 0 ? "up" : "down");
+  }
+  function setPrice(sym, text, dir){
+    document.querySelectorAll('.px[data-sym="'+sym+'"]').forEach(el => applyRoll(el, text, dir));
+  }
+
+  function updateQuote(q){
+    // sparkline
+    document.querySelectorAll('.spark-box[data-sym="'+q.sym+'"]').forEach(b => {
+      b.innerHTML = q.spark ? sparkSVG(q.spark, (q.change ?? 0) >= 0) : "";
+    });
+    // change pill
+    document.querySelectorAll('.ch[data-sym="'+q.sym+'"]').forEach(c => {
+      if (q.change == null){ c.textContent = ""; return; }
+      const dir = q.change >= 0 ? "pos" : "neg", sign = q.change >= 0 ? "+" : "−";
+      c.className = "ch " + dir; c.dataset.sym = q.sym;
+      c.textContent = sign + Math.abs(q.change).toFixed(1) + "%";
+    });
+    // price (odometer)
+    if (q.price == null){
+      document.querySelectorAll('.px[data-sym="'+q.sym+'"]').forEach(el => {
+        el.textContent = ""; const na = document.createElement("span");
+        na.className = "na"; na.textContent = "n/a"; el.appendChild(na);
+      });
+      delete lastPrice[q.sym]; return;
+    }
+    const prev = lastPrice[q.sym];
+    const dir = prev == null ? 1 : (q.price >= prev ? 1 : -1);
+    setPrice(q.sym, money(q.price), dir);
+    lastPrice[q.sym] = q.price;
+  }
+
+  function buildTape(list){
+    const sep = '<span class="sep">•</span>';
+    const seq = list.map(cellHTML).join(sep) + sep;
+    // Repeat the sequence so one "unit" spans at least the viewport, then lay
+    // down two units — otherwise a short list (2 proxies) shows a gap on wrap.
+    tape.innerHTML = seq + seq;
+    const seqW = tape.scrollWidth / 2 || 1;
+    const wrapW = (tape.parentElement ? tape.parentElement.clientWidth : 452) + 40;
+    const reps = Math.max(2, Math.ceil(wrapW / seqW));
+    const unit = seq.repeat(reps);
+    tape.innerHTML = unit + unit;
+    // convert every price cell to animatable slots
+    tape.querySelectorAll('.px[data-sym]').forEach(el => {
+      if (el.querySelector(".na")) return;
+      buildSlots(el, el.textContent);
+    });
+    list.forEach(q => { if (q.price != null) lastPrice[q.sym] = q.price; });
+  }
+
+  function measure(){ setW = tape.scrollWidth / 2; if (x <= -setW) x = 0; }
+
+  function frame(t){
+    if (!last) last = t;
+    const dt = (t - last)/1000; last = t;
+    if (setW > 0){
+      x -= SPEED * dt;
+      if (x <= -setW) x += setW;
+      tape.style.transform = "translate3d(" + x + "px,0,0)";
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  /* ================================================================= *
+   *  Python → page API                                                *
+   * ================================================================= */
+  window.setSeries = function(payload){
+    S = { pts: payload.points || [], days: payload.days || 1, candles: !!payload.candles };
+    resize();
+    if (!S.pts.length){ ctx.clearRect(0,0,W,H); return; }
+    computeRange();
+    S.cagg = S.candles ? aggregate(S.pts, Math.max(20, Math.floor(PW / 6))) : null;
+    if (payload.transition){ pinned = false; hoverOn = false; animateIn(); }
+    else { prog = 1; animing = false; draw(); }
+  };
+  window.setHero = function(m){
+    const el = $("price"), ch = $("heroch");
+    if (m.price == null){
+      el.textContent = ""; const na = document.createElement("span");
+      na.className = "na"; na.textContent = "—"; el.appendChild(na);
+      ch.textContent = ""; delete lastPrice.__hero; return;
+    }
+    const prev = lastPrice.__hero, dir = prev == null ? 1 : (m.price >= prev ? 1 : -1);
+    applyRoll(el, money(m.price), dir);
+    lastPrice.__hero = m.price;
+    if (m.change == null){ ch.textContent = ""; }
+    else { const up = m.change >= 0; ch.className = "ch " + (up ? "pos" : "neg");
+           ch.textContent = (up ? "+" : "−") + Math.abs(m.change).toFixed(1) + "%"; }
+  };
+  window.setQuotes = function(list){
+    const syms = list.map(q => q.sym).join(",");
+    if (syms !== builtSyms){ buildTape(list); builtSyms = syms; }
+    else list.forEach(updateQuote);
+    measure();
+  };
+  window.setMeta = function(m){
+    if (m.timeframe) $("tf").textContent = m.timeframe;
+    const asof = $("asof");
+    if (m.asof !== undefined){
+      let html = "as of <b>" + m.asof + "</b>";
+      if (m.block != null) html += " · blk <b>" + m.block.toLocaleString("en-US") + "</b>";
+      asof.innerHTML = html;
+    }
+    if (m.live !== undefined) asof.classList.toggle("stale", !m.live);
+  };
+
+  // re-fit the canvas if the window is ever resized
+  window.addEventListener("resize", () => {
+    if (S){ resize(); computeRange();
+      S.cagg = S.candles ? aggregate(S.pts, Math.max(20, Math.floor(PW / 6))) : null; draw(); }
+  });
+
+  // diagnostics: drive the hover crosshair for screenshots
+  window.__diagHover = (frac) => { hoverOn = true; hoverX = PL + PW * frac; draw(); };
+  window.__diagUnhover = () => { hoverOn = false; draw(); };
+
+  // click / Escape → ask Python to hide (preserves the old window behaviour)
+  const ctl = (a) => { try { window.webkit.messageHandlers.control.postMessage(a); } catch(e){} };
+  document.body.addEventListener("click", () => ctl("hide"));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (pinned){ pinned = false; hoverOn = false; scheduleDraw(); } else ctl("hide");
+  });
+</script>
+</body>
+</html>

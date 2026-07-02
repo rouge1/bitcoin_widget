@@ -4,6 +4,7 @@
 import argparse
 import sys
 import os
+import base64
 import json
 import socket
 import threading
@@ -22,66 +23,9 @@ import config
 import autostart
 from price_fetcher import PriceFetcher
 from graph_renderer import render_graph
+from web_window import WebGraphWindow
 
 ICON_NAME = "utilities-system-monitor"
-
-
-class GraphWindow(Gtk.Window):
-    """Small popup window that shows the price graph, closes on focus loss."""
-
-    def __init__(self):
-        super().__init__(type=Gtk.WindowType.TOPLEVEL)
-        self._last_pos = None
-        self.set_decorated(False)
-        self.set_resizable(False)
-        self.set_keep_above(True)
-        self.set_skip_taskbar_hint(True)
-        self.set_skip_pager_hint(True)
-        self.set_type_hint(Gdk.WindowTypeHint.POPUP_MENU)
-
-        self._image = Gtk.Image()
-        frame = Gtk.Frame()
-        frame.set_shadow_type(Gtk.ShadowType.ETCHED_IN)
-        frame.add(self._image)
-        self.add(frame)
-
-        self.connect("focus-out-event", lambda *_: None)
-        self.connect("key-press-event", self._on_key)
-        self.connect("button-press-event", lambda *_: self.hide())
-
-    def _on_key(self, _, event):
-        if event.keyval == Gdk.KEY_Escape:
-            self.hide()
-
-    def update_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf):
-        """Update the image without stealing focus (for live refreshes)."""
-        self._image.set_from_pixbuf(pixbuf)
-
-    def show_graph(self, pixbuf: GdkPixbuf.Pixbuf, reuse_pos=False):
-        """Display pixbuf. Repositions only when not reusing a saved position."""
-        # If visible, capture the live position so user-drags are preserved
-        if self.get_visible():
-            self._last_pos = self.get_position()
-
-        self._image.set_from_pixbuf(pixbuf)
-        self.resize(pixbuf.get_width(), pixbuf.get_height())
-
-        if not reuse_pos or self._last_pos is None:
-            display = Gdk.Display.get_default()
-            seat = display.get_default_seat()
-            _, mx, _ = seat.get_pointer().get_position()
-            monitor = display.get_monitor_at_point(mx, 0)
-            workarea = monitor.get_workarea()  # excludes panels
-
-            w, h = pixbuf.get_width(), pixbuf.get_height()
-            x = max(workarea.x, min(mx - w // 2, workarea.x + workarea.width - w))
-            y = workarea.y + 4  # just below the panel
-
-            self._last_pos = (x, y)
-
-        self.move(*self._last_pos)
-        self.show_all()
-        self.present()
 
 
 SOCKET_PATH = str(config._SETTINGS_DIR / "diag.sock")
@@ -110,14 +54,16 @@ class BitcoinWidget:
     def __init__(self, diag=False):
         self._diag = diag
         self._sock = None
-        self._cached_graph: GdkPixbuf.Pixbuf | None = None
         self._cached_points = None
-        # Per-timeframe cache: {days: (points, pixbuf)} — survives day switches
-        self._tf_cache: dict[int, tuple] = {}
+        # Per-timeframe cache: {days: points} — survives day switches, so a
+        # switch back re-draws instantly while the fresh fetch lands.
+        self._tf_cache: dict[int, list] = {}
+        # Last-known equity quotes {symbol: (price, change_pct)} for the graph
+        self._stock_quotes: dict[str, tuple] = {}
         self._graph_days = config.load_graph_days()
         self._show_candles = config.load_show_candles()
         self._auto_show_graph = False
-        self._graph_window = GraphWindow()
+        self._graph_window = WebGraphWindow()
 
         # --- Diagnostic state (single source of truth for live values) ---
         self._debug_log = []
@@ -125,12 +71,14 @@ class BitcoinWidget:
             "label": {"text": "BTC …", "price": None, "change": None, "updated": None},
             "graph": {"price": None, "change": None, "points": 0, "days": self._graph_days, "updated": None},
             "api": {"price": None, "change": None, "source": None, "updated": None},
+            "stocks": {"quotes": {}, "updated": None},
         }
 
         # --- Price fetcher (created before menu so handlers can reference it) ---
         self._fetcher = PriceFetcher(
             price_callback=self._on_price_update,
             history_callback=self._on_history_update,
+            stocks_callback=self._on_stocks_update,
         )
 
         # --- AppIndicator ---
@@ -188,12 +136,13 @@ class BitcoinWidget:
 
     def _toggle_graph(self):
         visible = self._graph_window.get_visible()
-        has_graph = self._cached_graph is not None
+        has_graph = self._cached_points is not None
         self._log(f"toggle_graph visible={visible} has_cached={has_graph}")
         if visible:
             self._graph_window.hide()
         elif has_graph:
-            self._graph_window.show_graph(self._cached_graph, reuse_pos=False)
+            self._push_series()
+            self._graph_window.show_at(reuse_pos=False)
         return False
 
     # ------------------------------------------------------------------ #
@@ -207,49 +156,94 @@ class BitcoinWidget:
         now = time.time()
         self._state["label"] = {"text": label, "price": price, "change": round(change_24h, 2), "updated": now}
         self._state["api"] = {"price": price, "change": round(change_24h, 2), "source": self._fetcher.last_price_source, "updated": now}
+        self._push_ticker()
+        self._push_meta(live=True)
         return False
 
     def _on_history_update(self, points: list):
+        days = self._graph_days
         self._cached_points = points
-        threading.Thread(
-            target=self._render_graph_bg,
-            args=(points, self._graph_days),
-            daemon=True,
-        ).start()
-        return False
-
-    def _render_graph_bg(self, points, days):
+        self._tf_cache[days] = points
         live_price = self._state["api"]["price"]
-        live_change = self._state["api"]["change"]
-        pixbuf = render_graph(points, days=days,
-                              live_price=live_price,
-                              live_change=live_change,
-                              show_candles=self._show_candles)
-        if pixbuf:
-            graph_state = {
-                "price": round(live_price, 2) if live_price else round(points[-1][4], 2),
-                "change": round(live_change, 2) if live_change else round((points[-1][4] - points[0][4]) / points[0][4] * 100, 2),
-                "points": len(points),
-                "days": days,
-                "updated": time.time(),
-            }
-            GLib.idle_add(self._cache_graph, pixbuf, graph_state)
-
-    def _cache_graph(self, pixbuf, graph_state):
-        self._cached_graph = pixbuf
-        days = graph_state["days"]
-        self._tf_cache[days] = (self._cached_points, pixbuf)
-        self._log(f"cache_graph days={days} points={graph_state['points']}")
-        self._state["graph"] = graph_state
-        # Only update the visible window if this render is for the *current* timeframe
-        if days != self._graph_days:
-            return False
+        endpoint = live_price if live_price is not None else points[-1][4]
+        baseline = points[0][4]
+        tf_change = (endpoint - baseline) / baseline * 100 if baseline else 0.0
+        self._state["graph"] = {
+            "price": round(endpoint, 2), "change": round(tf_change, 2),
+            "points": len(points), "days": days, "updated": time.time(),
+        }
+        self._log(f"history days={days} points={len(points)}")
+        # Push the raw series to the canvas (it draws client-side — no matplotlib
+        # in the hot path). Sweep the entrance in only when re-opening the popup.
+        self._graph_window.set_series(points, days, self._show_candles,
+                                      transition=self._auto_show_graph)
+        self._push_meta(live=True)
+        self._push_ticker()   # BTC baseline / sparkline may have shifted
         if self._auto_show_graph:
             self._auto_show_graph = False
-            self._graph_window.show_graph(pixbuf, reuse_pos=True)
-        elif self._graph_window.get_visible():
-            self._graph_window.update_pixbuf(pixbuf)
+            self._graph_window.show_at(reuse_pos=True)
         return False
+
+    def _on_stocks_update(self, quotes: dict):
+        # Merge (don't replace) so a transient fetch failure keeps last-known
+        # prices instead of flashing "n/a".
+        self._stock_quotes.update(quotes)
+        self._state["stocks"] = {
+            "quotes": {s: [round(v[0], 2), round(v[1], 2)] for s, v in self._stock_quotes.items()},
+            "updated": time.time(),
+        }
+        self._push_ticker()
+        return False
+
+    @staticmethod
+    def _downsample(vals, n):
+        """Thin a value list down to ~n evenly-spaced points (for a sparkline)."""
+        if len(vals) <= n:
+            return [round(float(v), 2) for v in vals]
+        step = len(vals) / n
+        return [round(float(vals[min(len(vals) - 1, int(i * step))]), 2) for i in range(n)]
+
+    def _ticker_rows(self):
+        """Rows for the scrolling tape: (sym, price, change, spark).
+        BTC's change is timeframe-relative; its sparkline is the chart series."""
+        price = self._state["api"]["price"]
+        btc_spark = (self._downsample([p[4] for p in self._cached_points], config.SPARK_POINTS)
+                     if self._cached_points else None)
+        if price is None:
+            rows = [("BTC", None, 0.0, None)]
+        elif self._cached_points:
+            base = self._cached_points[0][4]
+            rows = [("BTC", price, (price - base) / base * 100 if base else 0.0, btc_spark)]
+        else:
+            rows = [("BTC", price, self._state["api"]["change"] or 0.0, None)]
+        for symbol in config.STOCK_SYMBOLS:
+            q = self._stock_quotes.get(symbol)
+            rows.append((symbol, q[0] if q else None, q[1] if q else None,
+                         q[2] if q and len(q) > 2 else None))
+        return rows
+
+    def _push_ticker(self):
+        rows = self._ticker_rows()
+        _, price, change, _ = rows[0]   # BTC → the header hero (not the tape)
+        self._graph_window.set_hero(price, change if price is not None else None)
+        # The tape carries only the proxies (MSTR/STRC) — BTC is the hero now.
+        quotes = [{"sym": s, "price": p, "change": c, "spark": sp} for s, p, c, sp in rows[1:]]
+        self._graph_window.set_quotes(quotes)
+
+    def _push_series(self, transition=False):
+        """(Re)draw the popup's canvas chart from the cached points."""
+        if self._cached_points:
+            self._graph_window.set_series(
+                self._cached_points, self._graph_days, self._show_candles, transition=transition)
+
+    def _push_meta(self, live=True):
+        """Header meta: timeframe, freshness, and the 'as of HH:MM · block' line."""
+        tf = {1: "24H", 7: "7D", 30: "30D"}.get(self._graph_days, f"{self._graph_days}D")
+        self._graph_window.set_meta(
+            timeframe=tf, live=live,
+            asof=time.strftime("%H:%M"),
+            block=self._fetcher.last_block_height,
+        )
 
     # ------------------------------------------------------------------ #
     #  Menu callbacks                                                      #
@@ -261,35 +255,32 @@ class BitcoinWidget:
         self._item_candle_toggle.set_label(
             "Show Lines" if self._show_candles else "Show Candles"
         )
-        # Invalidate cached pixbufs (rendered with old style) but keep points
-        self._tf_cache.clear()
-        if self._cached_points:
-            threading.Thread(
-                target=self._render_graph_bg,
-                args=(self._cached_points, self._graph_days),
-                daemon=True,
-            ).start()
+        # Canvas re-draws from cached points instantly — no re-fetch, no re-render.
+        self._push_series()
 
     def _on_timeframe_activated(self, item, days):
         if days != self._graph_days:
             self._graph_days = days
             config.save_graph_days(days)
             self._fetcher.set_history_days(days)
+            self._push_meta(live=False)  # stale until refetch lands
             cached = self._tf_cache.get(days)
             if cached:
-                # Show cached instantly, then refresh in background
-                self._cached_points, self._cached_graph = cached
+                # Show cached instantly (entrance sweep), then refresh in background
+                self._cached_points = cached
                 reuse = self._graph_window.get_visible()
-                self._graph_window.show_graph(self._cached_graph, reuse_pos=reuse)
+                self._graph_window.set_series(cached, days, self._show_candles, transition=True)
+                self._push_ticker()
+                self._graph_window.show_at(reuse_pos=reuse)
                 self._auto_show_graph = False
             else:
-                self._cached_graph = None
                 self._cached_points = None
                 self._auto_show_graph = True
             self._fetcher.refresh()
-        elif self._cached_graph is not None:
+        elif self._cached_points is not None:
             reuse = self._graph_window.get_visible()
-            self._graph_window.show_graph(self._cached_graph, reuse_pos=reuse)
+            self._push_series(transition=True)
+            self._graph_window.show_at(reuse_pos=reuse)
 
     def _on_quit(self, _):
         self._fetcher.stop()
@@ -316,12 +307,86 @@ class BitcoinWidget:
             try:
                 conn, _ = self._sock.accept()
                 with conn:
-                    out = dict(self._state)
-                    out["debug_log"] = list(self._debug_log)
-                    response = json.dumps(out, indent=2) + "\n"
+                    conn.settimeout(0.5)
+                    try:
+                        req = conn.recv(64).decode().strip()
+                    except (OSError, socket.timeout):
+                        req = ""
+                    if req == "graph":
+                        # The rendered chart pixbuf (plot only) as base64 PNG.
+                        response = json.dumps({"graph_png_b64": self._graph_png_b64()}) + "\n"
+                    elif req == "window":
+                        # The whole live WebKit window (header + chart + ticker) as base64 PNG.
+                        response = json.dumps({"window_png_b64": self._window_png_b64()}) + "\n"
+                    elif req in ("show", "hide"):
+                        response = json.dumps({req: self._diag_set_visible(req == "show")}) + "\n"
+                    else:
+                        out = dict(self._state)
+                        out["debug_log"] = list(self._debug_log)
+                        response = json.dumps(out, indent=2) + "\n"
                     conn.sendall(response.encode())
             except OSError:
                 break
+
+    def _graph_png_b64(self):
+        """Base64 PNG of the chart, rendered on demand from cached points via
+        matplotlib. The popup itself now draws on a canvas; this standalone
+        'plot only' render is kept as a diagnostic. Returns None if no data."""
+        points = self._cached_points
+        if not points:
+            return None
+        try:
+            pixbuf = render_graph(points, days=self._graph_days,
+                                  show_candles=self._show_candles, header=False)
+            if pixbuf is None:
+                return None
+            ok, data = pixbuf.save_to_bufferv("png", [], [])
+        except Exception:
+            return None
+        return base64.b64encode(data).decode() if ok else None
+
+    def _run_on_main(self, fn, timeout=4.0):
+        """Run fn() on the GTK main thread and block for its result: (value, error).
+        GTK/Gdk calls must not run on the socket's daemon thread."""
+        box, done = {}, threading.Event()
+        def wrapper():
+            try:
+                box["value"] = fn()
+            except Exception as e:  # noqa: BLE001
+                box["error"] = e
+            done.set()
+            return False
+        GLib.idle_add(wrapper)
+        done.wait(timeout)
+        return box.get("value"), box.get("error")
+
+    def _diag_set_visible(self, show):
+        def do():
+            if show:
+                self._push_series()
+                self._graph_window.show_at(reuse_pos=False)
+            else:
+                self._graph_window.hide()
+            return True
+        value, _ = self._run_on_main(do)
+        return bool(value)
+
+    def _window_png_b64(self):
+        """Grab the actual on-screen window (chart + ticker child) as base64 PNG."""
+        def grab():
+            win = self._graph_window
+            if not win.get_visible():
+                return None
+            gdkwin = win.get_window()
+            if gdkwin is None:
+                return None
+            pb = Gdk.pixbuf_get_from_window(gdkwin, 0, 0, gdkwin.get_width(), gdkwin.get_height())
+            if pb is None:
+                return None
+            ok, data = pb.save_to_bufferv("png", [], [])
+            return base64.b64encode(data).decode() if ok else None
+        value, _ = self._run_on_main(grab)
+        return value
 
     # ------------------------------------------------------------------ #
     #  Run                                                                 #
